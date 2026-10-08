@@ -65,6 +65,7 @@ jobs:
           test "$(git -C upstream rev-parse HEAD)" = ff6aec96948b70d94983af2641a6b67c94faeff5
           echo '82a42653f77077507f834af350f8458d7909af152ea9c2d6874bc759411f61f6  runtime-review-v2/patches/0002-atomic-store-and-thread-readback.patch' | sha256sum -c -
           echo '668c48d3d0b42dd90c201688b6be86930a7878aa5da9f91bf4dbc487b3c894c6  runtime-review-v2/patches/0003-Fix-handoff-storage-root-path-type.patch' | sha256sum -c -
+          echo '447a1bd9e43a83a1b64ae1b84bc843a601593996ad02c3e3bb1596e136dae892  runtime-review-v2/patches/0004-Open-prepared-handoffs-on-Unix.patch' | sha256sum -c -
           git -C upstream apply --check ../runtime-review/patches/0001-handoff-compact-checkpoints.patch
           git -C upstream apply ../runtime-review/patches/0001-handoff-compact-checkpoints.patch
           git -C upstream apply --check ../runtime-review/patches/0000-sync-workspace-release-lockfile.patch
@@ -73,8 +74,10 @@ jobs:
           git -C upstream apply ../runtime-review-v2/patches/0002-atomic-store-and-thread-readback.patch
           git -C upstream apply --check ../runtime-review-v2/patches/0003-Fix-handoff-storage-root-path-type.patch
           git -C upstream apply ../runtime-review-v2/patches/0003-Fix-handoff-storage-root-path-type.patch
+          git -C upstream apply --check ../runtime-review-v2/patches/0004-Open-prepared-handoffs-on-Unix.patch
+          git -C upstream apply ../runtime-review-v2/patches/0004-Open-prepared-handoffs-on-Unix.patch
           git -C upstream add -A
-          test "$(git -C upstream write-tree)" = a5ae288ba4bfca381405c28f926a420a7d26b057
+          test "$(git -C upstream write-tree)" = c57d907e21faf201f697d28e435e55c3d048669b
           git -C upstream diff --cached --check
           echo 'e85460a5c2a1f92d73ca0a40219c846f6a10d729f3186667485372c3aa82cfbf  upstream/codex-rs/Cargo.lock' | sha256sum -c -
       - name: Install required Ubuntu build headers
@@ -87,7 +90,7 @@ jobs:
       - name: Focused locked compilation
         working-directory: upstream/codex-rs
         run: cargo +1.95.0 check --locked -p codex-core -p codex-hooks -p codex-config -p codex-exec-server
-      - name: Focused native tests (disabled cases remain ignored)
+      - name: Focused native tests (prepare-dependent cases run on Linux)
         working-directory: upstream/codex-rs
         run: |
           set -euo pipefail
@@ -106,6 +109,6 @@ jobs:
       - name: State experimental limitations
         if: always()
         run: |
-          echo 'Source preview only. Native prepare, controlled readback, binding loading, and prepared-handoff continuation remain fixed disabled.' >> "$GITHUB_STEP_SUMMARY"
-          echo '11 test sources ignored: 10 prepare-dependent and 1 Windows privilege-dependent. No Windows, remote readback, production install, release-profile build, or full upstream test-suite validation.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Source preview. Prepared handoffs, controlled readback, binding loading and continuation are enabled on Unix by patch 0004 and exercised by the focused tests; other platforms keep them closed.' >> "$GITHUB_STEP_SUMMARY"
+          echo '1 test source ignored (Windows symlink privilege). No Windows, remote readback, production install, release-profile build, or full upstream test-suite validation.' >> "$GITHUB_STEP_SUMMARY"
           echo 'Check each step conclusion. An attempted build is not a pass; a green job does not enable disabled behavior.' >> "$GITHUB_STEP_SUMMARY"
