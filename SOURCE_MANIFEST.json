@@ -1,0 +1,40 @@
+{
+  "status": "EXPERIMENTAL_SOURCE_PREVIEW",
+  "component": "handoff-core-preview",
+  "source_inputs": [
+    {
+      "id": "source-A",
+      "use": "Two adapted handoff/draft modules; feature-scoped redistribution reviewed"
+    }
+  ],
+  "adapted_files": [
+    "handoff_core/drafts.py",
+    "handoff_core/handoff.py"
+  ],
+  "new_feature_scoped_files": [
+    "handoff_core/__init__.py",
+    "handoff_core/__main__.py",
+    "handoff_core/state_paths.py",
+    "tests/test_core.py",
+    "handoff_core/observation_v2.py",
+    "tests/test_observation_v2.py"
+  ],
+  "modifications": [
+    "Rename package handoff_core",
+    "Replace broad runtime adapter with explicitly selected observation and binding files",
+    "Replace private state layout with mandatory explicit state directory",
+    "Remove personal role text",
+    "Add feature-scoped CLI and synthetic stdlib tests"
+  ],
+  "runtime_integration": "V1 binding observer is unchanged and incompatible with V2 opaque IDs. Optional observation_v2 checks explicitly supplied offline captures only; no live native integration or action authorization. Native gates remain disabled.",
+  "original_increment_license": "Apache-2.0, copyright 2026 Ubadream; applies only to contributions the owner is entitled to license",
+  "dependencies": {
+    "runtime": "Python >=3.11 standard library only",
+    "build": "setuptools >=77.0.3; wheel build command verified with setuptools 84.0.0"
+  },
+  "native_source_components": [
+    "runtime-review/patches/0001-handoff-compact-checkpoints.patch",
+    "runtime-review/patches/0000-sync-workspace-release-lockfile.patch",
+    "runtime-review-v2/patches/0002-atomic-store-and-thread-readback.patch"
+  ]
+}

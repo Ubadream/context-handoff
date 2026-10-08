@@ -1,0 +1,9 @@
+Handoff Core Preview
+Copyright 2026 Ubadream
+
+Original contributions that Ubadream is entitled to license are licensed under
+Apache License 2.0. This statement does not relicense third-party material.
+
+This Python component contains no bundled OpenAI Codex or Ratatui runtime code.
+A separately distributed native Codex patch must retain its own applicable
+upstream copyright, license, and NOTICE statements.
