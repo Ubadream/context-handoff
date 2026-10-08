@@ -1,4 +1,4 @@
-From 9311156fa58543c05df4ab220a7ec176588549fc Mon Sep 17 00:00:00 2001
+From 7a7e915d49206fdcd6175352b9d078d1070ae1be Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 9 Oct 2026 01:20:41 +0800
 Subject: [PATCH] Open prepared handoffs on Unix and Windows, with a Windows
@@ -36,11 +36,11 @@ text explain prepare instead of forbidding it.
  codex-rs/core/src/handoff_binding.rs          |  13 +-
  .../src/tools/handlers/handoff_compact.rs     |   2 +-
  codex-rs/core/tests/suite/handoff_compact.rs  |  25 +-
- .../tests/suite/handoff_compact_security.rs   |  78 ++++--
+ .../tests/suite/handoff_compact_security.rs   |  75 ++++--
  .../src/no_follow/atomic_directory_windows.rs | 228 ++++++++++++++++++
  .../atomic_directory_windows_tests.rs         |  64 +++++
  codex-rs/exec-server/src/no_follow/windows.rs | 187 +++++++++++---
- 8 files changed, 530 insertions(+), 69 deletions(-)
+ 8 files changed, 527 insertions(+), 69 deletions(-)
  create mode 100644 codex-rs/exec-server/src/no_follow/atomic_directory_windows.rs
  create mode 100644 codex-rs/exec-server/src/no_follow/atomic_directory_windows_tests.rs
 
@@ -168,7 +168,7 @@ index 70d355847..4be681824 100644
      let dir = tempfile::tempdir()?;
      let path = dir.path().join("HANDOFF.md");
 diff --git a/codex-rs/core/tests/suite/handoff_compact_security.rs b/codex-rs/core/tests/suite/handoff_compact_security.rs
-index c4473ae88..ebee1e70a 100644
+index c4473ae88..fa0940f25 100644
 --- a/codex-rs/core/tests/suite/handoff_compact_security.rs
 +++ b/codex-rs/core/tests/suite/handoff_compact_security.rs
 @@ -7,7 +7,6 @@ use codex_exec_server::LOCAL_ENVIRONMENT_ID;
@@ -235,15 +235,12 @@ index c4473ae88..ebee1e70a 100644
  async fn handoff_prepare_rejects_unknown_environment_without_host_fallback() -> Result<()> {
      let server = responses::start_mock_server().await;
      let test = test_codex().build(&server).await?;
-@@ -173,15 +182,42 @@ async fn handoff_prepare_rejects_unknown_environment_without_host_fallback() ->
+@@ -173,15 +182,39 @@ async fn handoff_prepare_rejects_unknown_environment_without_host_fallback() ->
  }
  
  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 -#[ignore = "prepared handoffs are disabled until atomic index publication is implemented"]
-+#[cfg_attr(
-+    not(any(unix, windows)),
-+    ignore = "prepared handoffs need the atomic no-follow store"
-+)]
++#[ignore = "needs the filesystem sandbox helper, which aborts before the turn starts on the focused CI runner; run with --ignored where the sandbox works"]
  async fn handoff_prepare_enforces_denied_synthetic_outside_file() -> Result<()> {
 +    skip_if_target_windows!(
 +        Ok(()),
@@ -280,7 +277,7 @@ index c4473ae88..ebee1e70a 100644
      let mock = responses::mount_sse_sequence(
          &server,
          vec![
-@@ -193,18 +229,7 @@ async fn handoff_prepare_enforces_denied_synthetic_outside_file() -> Result<()>
+@@ -193,18 +226,7 @@ async fn handoff_prepare_enforces_denied_synthetic_outside_file() -> Result<()>
          ],
      )
      .await;
@@ -300,7 +297,7 @@ index c4473ae88..ebee1e70a 100644
      let request = mock.last_request().context("tool result request")?;
      let output = request
          .function_call_output_text("prepare")
-@@ -221,7 +246,10 @@ async fn handoff_prepare_enforces_denied_synthetic_outside_file() -> Result<()>
+@@ -221,7 +243,10 @@ async fn handoff_prepare_enforces_denied_synthetic_outside_file() -> Result<()>
  }
  
  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -312,7 +309,7 @@ index c4473ae88..ebee1e70a 100644
  async fn handoff_prepare_resolves_relative_path_in_explicit_local_environment() -> Result<()> {
      let server = responses::start_mock_server().await;
      let test = test_codex().build(&server).await?;
-@@ -289,7 +317,10 @@ async fn handoff_prepare_resolves_relative_path_in_explicit_local_environment()
+@@ -289,7 +314,10 @@ async fn handoff_prepare_resolves_relative_path_in_explicit_local_environment()
  }
  
  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -324,7 +321,7 @@ index c4473ae88..ebee1e70a 100644
  async fn handoff_prepare_rejects_invalid_or_oversized_source_before_snapshot() -> Result<()> {
      for content in [vec![0xff, 0xfe], vec![b'x'; 32 * 1024 + 1], vec![b' '; 4]] {
          let server = responses::start_mock_server().await;
-@@ -323,7 +354,10 @@ async fn handoff_prepare_rejects_invalid_or_oversized_source_before_snapshot() -
+@@ -323,7 +351,10 @@ async fn handoff_prepare_rejects_invalid_or_oversized_source_before_snapshot() -
  }
  
  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
