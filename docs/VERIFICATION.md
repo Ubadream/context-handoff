@@ -1,5 +1,17 @@
 # Verification
 
+## Claude Code adapter (`adapters/claude/`)
+
+- Daily use on the maintainer's Windows machine since 2026-09-25. From the session transcripts: 24 compactions since then, 0 automatic; median context 412K tokens before, 89K after (21 measurable). One compaction on 2026-09-30, from the plugin trace: 3 segments dropped (602,545 → 498,605 characters), tool round-trips to one line (579 → 30 messages, 498,605 → 38,102 characters).
+- Large-output hook observed live on 2026-10-01: a 37,322-character Grep result kept at about 3,500 characters; a 32,798-character `Read` kept to its first 275 lines with correct numbering; WebFetch output saved to a file.
+- Model step replaced by `CW_MODEL_CMD="claude -p --model haiku"` on 2026-10-09: 8 segments labelled in 83 s. Without any model, segmentation still runs with no labels (unit-tested).
+- CI job `claude-adapter`: unit tests on synthetic data on Linux (installer on a fresh home, hook rewiring, output trimming shapes, model fallback, section hashes, retrieval). It does not run Claude Code.
+- Not verified: installation on any machine other than the maintainer's; macOS; the idle reminder firing after a real idle period.
+
+Codex, private runtime overlay (not this repository's gated patches): in ten long-running threads, 574 host-initiated compactions before 2026-09-28; 406 after, 397 of them scheduled by the agent through `wife_compact` (362 A, 35 C). Counted from `compacted` events in the rollout files, deduplicated across forks, with the preceding `wife_compact` call in the same window.
+
+## Handoff core and native Codex patches
+
 Verified on 2026-10-08, Python 3.12.14 on Linux:
 
 - `python -m unittest discover -s tests -v`: 11 passed, 0 failed, 0 skipped.
@@ -13,11 +25,11 @@ Synthetic tests cover absent reads, idempotent saves/exports, stale revisions, c
 
 Not completed: native Codex build, live model compaction, native prepare/continue/wait integration, actual user-session access, Windows installation, or production runtime install/uninstall. Python tests do not establish native runtime correctness. This is an experimental source preview, not a production certification. Subsequent public CI results must be read for the exact published commit; only the Python success from the exact first public run below is established.
 
-## Additive offline V2 observer
+### Additive offline V2 observer
 
 The unchanged V1 tests plus 14 additive offline observer tests passed together on Linux: 25 passed, 0 failures, 0 skipped. The additive module and tests use only synthetic captures. No native prepare/read invocation or live integration is claimed. The prior wheel build/install/uninstall evidence above predates the observer addition; this combined preview has source-test coverage, not a newly claimed packaging pass. See `ADAPTER-V2.md`.
 
-## First public CI and corrective source
+### First public CI and corrective source
 
 Public commit `566a627dde8f1d437fa9825b19beeeb9f15cc7b6`, [run 37783812942](https://github.com/Ubadream/context-handoff/actions/runs/37783812942): Python succeeded. Native locked compilation reached `codex-core` and failed with E0308 at `core/src/handoff_binding.rs:79`; the focused native test and CLI build steps were skipped. No native pass is inferred from successful dependency compilation.
 

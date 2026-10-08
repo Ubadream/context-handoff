@@ -1,6 +1,6 @@
 # Handoff core and native Codex patches (preview)
 
-Experimental source preview. Original contributions use Apache-2.0, copyright 2026 Ubadream. This repository combines a tested Python draft/export component with separately scoped, partially verified native Codex patches. It is not a production runtime or installer.
+Experimental source preview. Original contributions use Apache-2.0, copyright 2026 Ubadream. This part of the repository combines a tested Python draft/export component with separately scoped, partially verified native Codex patches. It is not a production runtime or installer.
 
 ## Implemented scope
 
@@ -12,7 +12,7 @@ Safety properties include SQLite compare-and-swap revisions, append-only draft h
 
 ## Run without installation
 
-From this directory:
+From the repository root:
 
     python -m unittest discover -s tests -v
     python -m handoff_core --help
@@ -64,7 +64,7 @@ The standard GitHub Actions workflow checks Python and attempts focused Rust che
 
 ## Native V2 and companion compatibility
 
-The current native source candidate is the base Gate B patch plus the minimal lockfile prerequisite plus `runtime-review-v2/patches/0002-atomic-store-and-thread-readback.patch` and `runtime-review-v2/patches/0003-Fix-handoff-storage-root-path-type.patch`, in that order. The V2 delta implements Unix atomic store publication and thread-scoped opaque-ID readback source, but does not enable native prepare, readback, binding application, or automatic continuation. Windows atomic publication explicitly returns Unsupported. See the [V2 scope and test report](runtime-review-v2/README.md).
+The current native source candidate is the base Gate B patch plus the minimal lockfile prerequisite plus `runtime-review-v2/patches/0002-atomic-store-and-thread-readback.patch` and `runtime-review-v2/patches/0003-Fix-handoff-storage-root-path-type.patch`, in that order. The V2 delta implements Unix atomic store publication and thread-scoped opaque-ID readback source, but does not enable native prepare, readback, binding application, or automatic continuation. Windows atomic publication explicitly returns Unsupported. See the [V2 scope and test report](../runtime-review-v2/README.md).
 
 31 focused Linux tests passed in a production-module harness, including independent boundary tests. Those results are not full-crate compilation, Session integration, Windows, remote execution, or post-compaction end-to-end evidence. A full local locked build failed with SIGKILL in unchanged upstream codex-protocol before reaching the feature code. The first public CI run reached `codex-core` but failed with a return-type mismatch; native tests and CLI build did not run. The fourth patch corrects that one type mismatch. CI run [37788233583](https://github.com/Ubadream/context-handoff/actions/runs/37788233583) on commit df87cd4 then passed focused locked compilation, the focused native tests (disabled cases still ignored) and the debug CLI build.
 
@@ -78,4 +78,4 @@ The combined Python suite has 25 passing synthetic tests (11 original plus 14 ob
 
 ## Compile correction
 
-The first public run ([37783812942](https://github.com/Ubadream/context-handoff/actions/runs/37783812942)) passed Python and found E0308 in the native `storage_root` return value. The additive `0003` patch converts the existing `AbsolutePathBuf` result to the declared `PathBuf`; it does not change storage policy or enable any gated behavior. See [the exact fix manifest](runtime-review-v2/COMPILE-FIX.json) and [CI scope](CI_SCOPE.md). A corrected source candidate is not a claim that the full native build or integration tests now pass.
+The first public run ([37783812942](https://github.com/Ubadream/context-handoff/actions/runs/37783812942)) passed Python and found E0308 in the native `storage_root` return value. The additive `0003` patch converts the existing `AbsolutePathBuf` result to the declared `PathBuf`; it does not change storage policy or enable any gated behavior. See [the exact fix manifest](../runtime-review-v2/COMPILE-FIX.json) and [CI scope](CI_SCOPE.md). A corrected source candidate is not a claim that the full native build or integration tests now pass.

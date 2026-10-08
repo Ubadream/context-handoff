@@ -17,6 +17,8 @@ Long agent sessions hit the context limit, the host compacts, and then:
 
 ### Claude Code adapter (`adapters/claude/`), in daily use since late September 2026
 
+**Since 2026-09-25 the maintainer's Claude Code sessions have compacted 24 times, none of them automatically.** Every one happened at a chosen break: scheduled by the agent, or by the user typing `/compact`. The day before, without this adapter, the host compacted twice in the middle of work, once at 888K tokens. Across the 21 compactions where the result is measurable, median context went from 412K tokens before to 89K after (range 61K to 112K); roughly 70K of the "after" is fixed overhead (tool definitions, instructions, memory files) that compaction cannot touch.
+
 | Feature | What it does | Measured on a real session |
 |---|---|---|
 | Agent-chosen compaction | A `compact` tool lets the agent schedule compaction at a natural break, after updating its handoff. Mode A = built-in summary; mode C = summary plus the full pre-compaction text saved to a file, indexed by section with content hashes. Compaction is blocked if no handoff was written since the last one, unless the agent gives a reason. | |
@@ -28,6 +30,8 @@ Long agent sessions hit the context limit, the host compacts, and then:
 | Fixed-overhead diet | Rarely used tools are deferred and long skill descriptions shortened (switchable). | |
 
 ### Handoff core and native Codex patches (`handoff_core/`, `runtime-review*/`)
+
+The same flow also runs in the maintainer's Codex, through a private runtime overlay on Windows: the agent writes a handoff, calls `wife_compact(mode="prepare")` to bind it to the thread, then compacts with A or C and either continues or waits. In the maintainer's ten longest-running Codex threads, the host compacted 574 times on its own before the overlay went live on 2026-09-28. Since then there have been 406 compactions: 397 scheduled by the agent through `wife_compact` after binding its handoff (362 A, 35 C), 7 by the host, and 2 where the host compacted after a prepare but before the agent chose a mode. The patches here are the reviewed public extraction of that overlay. Prepare, readback and continuation ship switched off until they pass integration tests in public CI, and the hardened store has no Windows path yet (the private overlay writes through a temp file and rename there).
 
 A small standard-library Python component for revisioned handoff drafts, previews, deterministic exports and binding integrity checks, plus native Codex patches whose runtime gates are still closed. Details, safety properties and verification: [docs/HANDOFF_CORE.md](docs/HANDOFF_CORE.md).
 
@@ -45,6 +49,8 @@ Restart Claude Code, then check:
     python adapters/claude/cw_install.py doctor
 
 `apply` backs up `~/.claude/settings.json` first, points the hooks at this checkout (existing hooks of the same scripts are updated in place, others untouched), sets `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`, `CW_WORKBENCH` and `CW_PYTHON`, and installs the `wife-compact` plugin from this directory as a local marketplace.
+
+Tool output, saved originals and handoffs are stored as plain text under the state directory with no secret redaction; see [Privacy](#privacy).
 
 **Optional model.** Segment labels and handoff-gap suggestions use any command that reads a prompt on stdin and prints an answer. Add it to the `env` block of `~/.claude/settings.json`, for example:
 
@@ -72,7 +78,7 @@ State lives under `~/.local/state/wifeos/` (override with `CW_STATE_ROOT`).
 - The idle reminder has passed tests but has not yet been seen firing after a real idle period.
 - Messages and labels are in Traditional Chinese.
 - Not included from the private setup: recovering summary-dropped sentences with a local ranking model, and the control panel.
-- Codex: the native patches keep prepare, readback and automatic continuation disabled; end-to-end compaction and continuation are not verified. See [docs/HANDOFF_CORE.md](docs/HANDOFF_CORE.md).
+- Codex: in this public extraction, prepare, readback and continuation are switched off and the hardened store returns Unsupported on Windows; end-to-end use so far is only in the private overlay. See [docs/HANDOFF_CORE.md](docs/HANDOFF_CORE.md).
 
 ## Privacy
 
@@ -80,4 +86,4 @@ Everything runs locally and is stored as plain text: tool archives, saved origin
 
 ## License
 
-Apache-2.0. See `LICENSE`, `NOTICE` and [LICENSE_REVIEW.md](LICENSE_REVIEW.md). Release boundary: [EXCLUSIONS.md](EXCLUSIONS.md). Verification records: [VERIFICATION.md](VERIFICATION.md), [CI_SCOPE.md](CI_SCOPE.md).
+Apache-2.0. See `LICENSE`, `NOTICE` and [docs/LICENSE_REVIEW.md](docs/LICENSE_REVIEW.md). Release boundary: [docs/EXCLUSIONS.md](docs/EXCLUSIONS.md). Verification records: [docs/VERIFICATION.md](docs/VERIFICATION.md), [docs/CI_SCOPE.md](docs/CI_SCOPE.md).
