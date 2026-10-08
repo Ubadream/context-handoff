@@ -52,14 +52,17 @@ jobs:
           echo 'ed28854b7ee5e048620ce60ebaaea17cd58750350852bd4e5caad29c24b61e54  runtime-review/patches/0001-handoff-compact-checkpoints.patch' | sha256sum -c -
           test "$(git -C upstream rev-parse HEAD)" = ff6aec96948b70d94983af2641a6b67c94faeff5
           echo '82a42653f77077507f834af350f8458d7909af152ea9c2d6874bc759411f61f6  runtime-review-v2/patches/0002-atomic-store-and-thread-readback.patch' | sha256sum -c -
+          echo '668c48d3d0b42dd90c201688b6be86930a7878aa5da9f91bf4dbc487b3c894c6  runtime-review-v2/patches/0003-Fix-handoff-storage-root-path-type.patch' | sha256sum -c -
           git -C upstream apply --check ../runtime-review/patches/0001-handoff-compact-checkpoints.patch
           git -C upstream apply ../runtime-review/patches/0001-handoff-compact-checkpoints.patch
           git -C upstream apply --check ../runtime-review/patches/0000-sync-workspace-release-lockfile.patch
           git -C upstream apply ../runtime-review/patches/0000-sync-workspace-release-lockfile.patch
           git -C upstream apply --check ../runtime-review-v2/patches/0002-atomic-store-and-thread-readback.patch
           git -C upstream apply ../runtime-review-v2/patches/0002-atomic-store-and-thread-readback.patch
+          git -C upstream apply --check ../runtime-review-v2/patches/0003-Fix-handoff-storage-root-path-type.patch
+          git -C upstream apply ../runtime-review-v2/patches/0003-Fix-handoff-storage-root-path-type.patch
           git -C upstream add -A
-          test "$(git -C upstream write-tree)" = a28cfbae42e0dcfe1533a410adc001ff3f9b2f5e
+          test "$(git -C upstream write-tree)" = a5ae288ba4bfca381405c28f926a420a7d26b057
           git -C upstream diff --cached --check
           echo 'e85460a5c2a1f92d73ca0a40219c846f6a10d729f3186667485372c3aa82cfbf  upstream/codex-rs/Cargo.lock' | sha256sum -c -
       - name: Install required Ubuntu build headers
