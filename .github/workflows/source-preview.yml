@@ -85,6 +85,10 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends libcap-dev
+      - name: Allow unprivileged user namespaces for the filesystem sandbox
+        # Ubuntu 24.04 runners restrict them through AppArmor; the deny-read test
+        # needs the sandbox helper to start rather than abort.
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Install exact official Rust toolchain
         run: rustup toolchain install 1.95.0 --profile minimal
       - name: Focused locked compilation
