@@ -1,0 +1,45 @@
+{
+  "status": "FOCUSED_PRODUCTION_MODULE_TESTS_PASSED_NOT_NATIVE_INTEGRATION",
+  "platform": "Linux",
+  "rust_version": "1.95.0",
+  "passed": 31,
+  "failed": 0,
+  "ignored_in_this_run": 0,
+  "production_tests": 18,
+  "independent_boundary_tests": 13,
+  "returncode": 0,
+  "elapsed_seconds": 17.369041582001955,
+  "child_maxrss_kib": 294956,
+  "resource_caveat": "Child maxrss is not summed concurrent-tree peak; global OOM counters do not identify a process.",
+  "production_source_sha256": {
+    "codex-rs/exec-server/src/no_follow/mod.rs": "d56c04c3b9c7e5f12571f6d54dba653cfb479e7ed027d1c4390fb079ab28d88b",
+    "codex-rs/exec-server/src/no_follow/unix.rs": "53f1d9347c9038a21f38d380fa069d51f743ed0262ed24fac5e5d34f02cb0238",
+    "codex-rs/exec-server/src/no_follow/bounded_store_tests.rs": "bc9fce018b5d6c715549240cbb0b84d5400a0d7fd4cee6ec449cffece00a1a08",
+    "codex-rs/exec-server/src/no_follow/atomic_directory_unix.rs": "c9098e1d6bfc81fe2f9e98fcccb737c192d991e504d271cd30f9d787c88bc2f0",
+    "codex-rs/exec-server/src/no_follow/atomic_directory_tests.rs": "78d9d1031995178486e904df63d6efefd3ae8bbcfa656fb5c0858bfad0f183f4",
+    "codex-rs/core/src/handoff_store.rs": "55d141df66505a6e2dd89b3b8aa7ebccedd4812bf0d35fc8efeb59d7013e0df1",
+    "codex-rs/core/src/handoff_store_tests.rs": "397d536fbd65f385bfe161f77d56d4b7bb48312ca3cfbd721599f5af81e5e03c",
+    "codex-rs/core/src/handoff_stream.rs": "2f793d932bb651b66e4a925a3ba5aa169bdbc9164e37c770c1b8a39ed4042a36",
+    "codex-rs/core/src/handoff_stream_tests.rs": "20c2fa95ced7257df078bf0a5763a368351d5e37cccc5144ae9f8a7f644c11e1",
+    "codex-rs/file-system/src/lib.rs": "c57fa0ed1fb464f5d78b7e71652b946d2cd7bb3f5ef09fa7dad6e7f34869247d"
+  },
+  "data_only_shims": [
+    "FileMetadata",
+    "FileSystemReadStream shape and crate wiring"
+  ],
+  "runtime_or_security_implementation_mocks": false,
+  "full_build": "FAILED_BEFORE_FEATURE: unchanged codex-protocol rustc terminated by SIGKILL",
+  "cause_of_sigkill": "not established by per-process OOM evidence",
+  "native_session_tool_integration": "NOT_RUN",
+  "windows": "NOT_RUN; atomic publication Unsupported",
+  "schema_regeneration": "NOT_RUN",
+  "clippy": "NOT_RUN",
+  "real_crash_or_power_loss": "NOT_RUN",
+  "stable_rustfmt": "PASS with upstream nightly-only imports_granularity warnings",
+  "application_check": "PASS on fresh full checkout",
+  "gate": "CLOSED; no runtime/environment bypass",
+  "source_marked_ignored_tests": {
+    "prepared_handoff_integration": 10,
+    "windows_privileged_symlink": 1
+  }
+}

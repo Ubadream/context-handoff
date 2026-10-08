@@ -1,0 +1,75 @@
+{
+  "schema": "handoff-runtime-delta/v2",
+  "status": "EXPERIMENTAL_GATED_PARTIAL_VERIFICATION",
+  "upstream_commit": "ff6aec96948b70d94983af2641a6b67c94faeff5",
+  "application_order": [
+    {
+      "name": "0001-handoff-compact-checkpoints.patch",
+      "sha256": "ed28854b7ee5e048620ce60ebaaea17cd58750350852bd4e5caad29c24b61e54",
+      "included": false
+    },
+    {
+      "name": "0000-sync-workspace-release-lockfile.patch",
+      "sha256": "1b99ed3fc93196fac8535ab01b0f9d3dfedb9593eb071613e83c4568c9fc2d0d",
+      "included": false
+    },
+    {
+      "name": "patches/0002-atomic-store-and-thread-readback.patch",
+      "sha256": "82a42653f77077507f834af350f8458d7909af152ea9c2d6874bc759411f61f6",
+      "included": true
+    }
+  ],
+  "base_tree": "705a0fb809b2a610413b01d5645eedad5d9d192f",
+  "result_tree": "a28cfbae42e0dcfe1533a410adc001ff3f9b2f5e",
+  "delta_paths": [
+    "codex-rs/core/src/compact.rs",
+    "codex-rs/core/src/compact_remote_v2.rs",
+    "codex-rs/core/src/context/checkpoint_reminder.rs",
+    "codex-rs/core/src/context/mod.rs",
+    "codex-rs/core/src/handoff_binding.rs",
+    "codex-rs/core/src/handoff_binding_tests.rs",
+    "codex-rs/core/src/handoff_compact.rs",
+    "codex-rs/core/src/handoff_store.rs",
+    "codex-rs/core/src/handoff_store_tests.rs",
+    "codex-rs/core/src/handoff_stream.rs",
+    "codex-rs/core/src/handoff_stream_tests.rs",
+    "codex-rs/core/src/lib.rs",
+    "codex-rs/core/src/session/turn.rs",
+    "codex-rs/core/src/tools/handlers/handoff_compact.rs",
+    "codex-rs/core/src/tools/handlers/mod.rs",
+    "codex-rs/core/tests/suite/handoff_compact.rs",
+    "codex-rs/core/tests/suite/handoff_compact_security.rs",
+    "codex-rs/exec-server/src/lib.rs",
+    "codex-rs/exec-server/src/no_follow/atomic_directory_tests.rs",
+    "codex-rs/exec-server/src/no_follow/atomic_directory_unix.rs",
+    "codex-rs/exec-server/src/no_follow/bounded_store_tests.rs",
+    "codex-rs/exec-server/src/no_follow/mod.rs",
+    "codex-rs/exec-server/src/no_follow/unix.rs",
+    "codex-rs/exec-server/src/no_follow/windows.rs",
+    "codex-rs/hooks/src/events/post_tool_use.rs"
+  ],
+  "delta_changes_lockfile": false,
+  "gate_closed": true,
+  "license": "Apache-2.0; upstream notices preserved",
+  "attribution": "Copyright 2026 Ubadream",
+  "allowlist": [
+    "LICENSE",
+    "MANIFEST.json",
+    "NOTICE",
+    "README.md",
+    "TEST-REPORT.json",
+    "UPSTREAM-LICENSE",
+    "UPSTREAM-NOTICE",
+    "patches/0002-atomic-store-and-thread-readback.patch"
+  ],
+  "member_hashes_excluding_manifest": {
+    "LICENSE": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc",
+    "NOTICE": "7e209ee732f6d58baf625a922c1c3733ffd8869a9771a1e6349307dd63feb6a4",
+    "README.md": "a34efd004d8fc3b1e64f6aa6dc60d89d82eaf2994e63dc496f28fdc97b20ed88",
+    "TEST-REPORT.json": "c259311fb3bb9d1a66aa3d9690e9296c427ebb887058a6d29b4ec728a9679fef",
+    "UPSTREAM-LICENSE": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc",
+    "UPSTREAM-NOTICE": "9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915",
+    "patches/0002-atomic-store-and-thread-readback.patch": "82a42653f77077507f834af350f8458d7909af152ea9c2d6874bc759411f61f6"
+  },
+  "python_offline_binding_observer": "INCOMPATIBLE_WITH_V2_OPAQUE_ID_CONTRACT; separate adapter required; Python source unchanged"
+}
