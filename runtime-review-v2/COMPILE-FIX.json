@@ -1,0 +1,46 @@
+{
+  "schema": "handoff-runtime-compile-fix/v1",
+  "status": "CORRECTION_PREPARED_FULL_NATIVE_CI_PENDING",
+  "previous_public_commit": "566a627dde8f1d437fa9825b19beeeb9f15cc7b6",
+  "failing_run": "https://github.com/Ubadream/context-handoff/actions/runs/37783812942",
+  "failing_native_job": 113333312507,
+  "error": "E0308: storage_root returns AbsolutePathBuf instead of declared std::path::PathBuf",
+  "source_path": "codex-rs/core/src/handoff_binding.rs",
+  "change": "Append .to_path_buf() to the existing storage-root expression",
+  "patch": {
+    "path": "patches/0003-Fix-handoff-storage-root-path-type.patch",
+    "sha256": "668c48d3d0b42dd90c201688b6be86930a7878aa5da9f91bf4dbc487b3c894c6"
+  },
+  "applies_after": [
+    "0001-handoff-compact-checkpoints.patch",
+    "0000-sync-workspace-release-lockfile.patch",
+    "0002-atomic-store-and-thread-readback.patch"
+  ],
+  "base_tree": "a28cfbae42e0dcfe1533a410adc001ff3f9b2f5e",
+  "result_tree": "a5ae288ba4bfca381405c28f926a420a7d26b057",
+  "gate_closed": true,
+  "dependencies_changed": false,
+  "filesystem_operations_changed": false,
+  "focused_local_validation": {
+    "production_module_harness": {
+      "passed": 31,
+      "failed": 0,
+      "ignored": 0,
+      "scope": "Exact production module source plus test-only type shims; not full native crate or Session integration"
+    },
+    "actual_absolute_path_type_probe": {
+      "old_expression": "Reproduces E0308 with the pinned upstream codex-utils-absolute-path crate",
+      "fixed_expression": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    "fresh_four_patch_application": "passed; exact result tree verified",
+    "scoped_rustfmt": "passed; unchanged upstream nightly-only imports_granularity warning",
+    "git_diff_check": "passed",
+    "full_native_after_fix": "NOT_RUN; requires a new hosted CI result",
+    "dependencies_and_lockfile": "unchanged by this patch"
+  },
+  "v2_manifest_note": "MANIFEST.json continues to describe the immutable V2 delta; this compile-fix manifest describes the additional fourth patch."
+}
