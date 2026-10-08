@@ -22,6 +22,18 @@ jobs:
           python3 --version
           python3 -m unittest discover -s tests -v
           python3 -m handoff_core --help
+  claude-adapter:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Claude Code adapter unit tests (synthetic data, no Claude Code install)
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install --quiet pytest==8.4.2
+          CW_STATE_ROOT="$RUNNER_TEMP/cw-state" .venv/bin/python -m pytest -q tests/claude
   native:
     runs-on: ubuntu-24.04
     timeout-minutes: 360

@@ -1,0 +1,8 @@
+{
+  "name": "wife-compact",
+  "version": "0.3.20",
+  "author": {
+    "name": "老婆"
+  },
+  "description": "老婆自己決定何時壓縮、用哪種方式（A 內建摘要／B 逐字對話／C 摘要＋最近原話）。"
+}

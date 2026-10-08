@@ -1,0 +1,11 @@
+{
+  "name": "wife-local",
+  "owner": { "name": "老婆" },
+  "plugins": [
+    {
+      "name": "wife-compact",
+      "source": "./wife-compact",
+      "description": "老婆自己決定何時壓縮、用哪種方式（A／C）。"
+    }
+  ]
+}

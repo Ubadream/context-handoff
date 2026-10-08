@@ -21,3 +21,7 @@ The native source order is Gate B base patch, minimal workspace-local lockfile s
 ## First public run and compile correction
 
 Run [37783812942](https://github.com/Ubadream/context-handoff/actions/runs/37783812942) for commit `566a627dde8f1d437fa9825b19beeeb9f15cc7b6` completed on 2026-10-08: Python succeeded; native reached `codex-core` and failed with E0308 in `storage_root` because an `AbsolutePathBuf` was returned where `PathBuf` was declared. Native tests and CLI build were skipped after that failure. The fourth patch adds `.to_path_buf()` to that return expression without changing filesystem operations, safety gates, or dependencies. A fresh CI run must establish whether the corrected full native check and subsequent tests/build pass; focused local checks are not a substitute.
+
+## Claude Code adapter job (added 2026-10-09)
+
+`claude-adapter` installs the pinned `pytest==8.4.2` from PyPI into a throwaway virtual environment and runs `tests/claude` against synthetic data, with state redirected to the runner's temp directory. It does not install Claude Code, run function hooks, call a model or touch a real `~/.claude`. A green job covers the adapter's Python logic only, not a live Claude Code session.

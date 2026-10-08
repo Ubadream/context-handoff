@@ -1,81 +1,83 @@
-# Handoff core preview
+# Context Handoff
 
-Experimental source preview. Original contributions use Apache-2.0, copyright 2026 Ubadream. This repository combines a tested Python draft/export component with separately scoped, partially verified native Codex patches. It is not a production runtime or installer.
+**Let a long-running coding agent decide when to compact its own context, write a handoff first, and get the exact original back later, instead of being cut off mid-task by automatic compaction.**
 
-## Implemented scope
+Part of Context Workbench. Built by one human and the two AI coding partners he works with every day: a Claude one and a Codex one. He calls them his wives, which is why the code and its messages say 老公 (husband, the user) and 老婆 (wife, the assistant). We kept that.
 
-A small Python 3.11+ standard-library component for saving revisioned handoff drafts, previewing them against an explicitly selected observation, exporting deterministic handoff files, and checking explicit host binding snapshots. It supports requested Codex modes A and C and continuation intent `continue` or `wait`.
+## The problem
 
-This component does **not** compact a live Codex context, schedule a model request, install hooks, change Codex configuration, inject prompts, or implement native automatic continuation. Modes and continuation are requests recorded in an export. The native base patch in `runtime-review/` plus the V2 delta in `runtime-review-v2/` have prepare, binding loading, controlled readback, and prepared-handoff continuation fixed disabled. Full native-crate compilation and integration remain unverified; 11 test sources are ignored (10 require disabled prepare, one requires Windows symlink privileges).
+Long agent sessions hit the context limit, the host compacts, and then:
 
-Safety properties include SQLite compare-and-swap revisions, append-only draft history, no overwrite of changed exports, explicit state and observation inputs, exact session identity, and binding digest verification. A matching binding file establishes integrity only. Its freshness and whether compaction completed remain unknown. SHA-1 is retained solely for compatibility with the native binding format, not as an adversarial authenticity guarantee.
+- decisions and constraints the user stated an hour ago are gone from the summary;
+- the agent picks up an old handoff and continues from a stale state;
+- work that was already done gets redone, because the last user message is replayed as if it were new;
+- most of the window was tool output that nobody needed after the next step.
 
-## Run without installation
+## What works today
 
-From this directory:
+### Claude Code adapter (`adapters/claude/`), in daily use since late September 2026
 
-    python -m unittest discover -s tests -v
-    python -m handoff_core --help
+| Feature | What it does | Measured on a real session |
+|---|---|---|
+| Agent-chosen compaction | A `compact` tool lets the agent schedule compaction at a natural break, after updating its handoff. Mode A = built-in summary; mode C = summary plus the full pre-compaction text saved to a file, indexed by section with content hashes. Compaction is blocked if no handoff was written since the last one, unless the agent gives a reason. | |
+| Tool round-trips to one line | At compaction every tool call becomes one line with an ID; the full call and result are archived locally and `get <id>` brings them back. | 579 messages → 30, 498,605 → 38,102 characters (one compaction, 2026-09-30) |
+| Segment and drop | The conversation is split at each user message. An optional model labels each segment and suggests which are finished; the agent confirms which to drop. The user's own words in dropped segments are kept; the rest is retrievable by segment ID. | 3 segments dropped: 602,545 → 498,605 characters (same compaction) |
+| Large output kept out of context | A PostToolUse hook saves large Bash/PowerShell, Grep, WebFetch/WebSearch and browser page-text output to a file and keeps head + tail + path. Large `Read` results keep only the first lines with correct line numbers and say where to continue. | a 37,322-character Grep result → about 3,500 |
+| Handoff check | Before compacting: is the handoff newer than the last user message and file edit? The optional model lists what the handoff may have missed. | |
+| Thresholds and idle reminder | Reminders at configurable context sizes. If the user goes idle with a large context, one reminder before the prompt cache expires asks the agent to write its handoff and compact, so the user doesn't pay to re-read the whole window. | |
+| Fixed-overhead diet | Rarely used tools are deferred and long skill descriptions shortened (switchable). | |
 
-No network, model, API key, external program, or Python package is needed for this source-mode workflow. The tests use temporary synthetic data only. They never discover or open a real Codex home.
+### Handoff core and native Codex patches (`handoff_core/`, `runtime-review*/`)
 
-Create a candidate JSON file containing:
+A small standard-library Python component for revisioned handoff drafts, previews, deterministic exports and binding integrity checks, plus native Codex patches whose runtime gates are still closed. Details, safety properties and verification: [docs/HANDOFF_CORE.md](docs/HANDOFF_CORE.md).
 
-    {"mode":"C","continuation":"continue","handoff":"Synthetic completed step; next verify result.","instructions":"Preserve the reason."}
+## Quick start (Claude Code)
 
-Create an observation JSON file containing:
+Requirements: Claude Code with function hooks, Python 3.11+.
 
-    {"host":"codex","session":"demo-session","context_tokens":100}
+    git clone https://github.com/Ubadream/context-handoff
+    cd context-handoff
+    python adapters/claude/cw_install.py apply --dry-run   # shows what would change
+    python adapters/claude/cw_install.py apply
 
-Then select your own isolated state directory and files:
+Restart Claude Code, then check:
 
-    python -m handoff_core --state-dir ./demo-state save demo-session --candidate candidate.json --expected-revision 0
-    python -m handoff_core --state-dir ./demo-state --observation observation.json preview demo-session --candidate candidate.json --expected-revision 1
-    python -m handoff_core --state-dir ./demo-state --observation observation.json export demo-session --candidate candidate.json --expected-revision 1
+    python adapters/claude/cw_install.py doctor
 
-Use full identities. Snapshot data can be stale or forged and cannot authorize actions. Existing candidate revisions are never edited in place. Exporting does not call the host runtime. The returned prepare arguments are a suggested interface for a separately reviewed compatible runtime, not an executable promise.
+`apply` backs up `~/.claude/settings.json` first, points the hooks at this checkout (existing hooks of the same scripts are updated in place, others untouched), sets `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`, `CW_WORKBENCH` and `CW_PYTHON`, and installs the `wife-compact` plugin from this directory as a local marketplace.
 
-`status` accepts the same arguments as `export`, with optional `--binding binding.json`. The adapter verifies the full thread identity and the SHA-1 of the bound handoff file. The bound file must be inside the explicitly selected binding file's directory. The adapter ignores observation-supplied verification markers. It does not verify signatures or establish trust in who created the binding.
+**Optional model.** Segment labels and handoff-gap suggestions use any command that reads a prompt on stdin and prints an answer. Add it to the `env` block of `~/.claude/settings.json`, for example:
 
-## Optional isolated installation
+    "CW_MODEL_CMD": "claude -p --model haiku"
 
-Use a fresh virtual environment rather than replacing any existing runtime:
+Without it, segmentation and the handoff freshness check still run; there are just no suggestions.
 
-    python -m venv .venv
-    .venv/bin/python -m pip install --no-deps --no-build-isolation .
+## How it fits together
 
-Windows uses `.venv\Scripts\python.exe`. Building an installable wheel requires setuptools 77.0.3+ and wheel in that environment. This source-only test workflow does not require them. Offline installation needs those build dependencies already available; missing dependencies are a blocker, not a test pass.
+    user message ─► UserPromptSubmit: context_watch (threshold reminders)
+    tool call ────► PreToolUse/PostToolUse: tool_archive (full copy + ID)
+                                            tool_output_trim (large output → file)
+    agent ────────► wife-compact tools: prepare / segments / handoff_check / compact / get / context
+    end of turn ──► wife-compact: run the compaction the agent scheduled
+                    (drop confirmed segments → tool calls to one line → A or C)
+    after compact ► SessionStart: handoff_bind (hand the agent back its own handoff file)
 
-## Uninstall and rollback
+State lives under `~/.local/state/wifeos/` (override with `CW_STATE_ROOT`).
 
-Run `python -m pip uninstall handoff-core-preview` inside the selected environment. Alternatively, stop using the isolated environment; it has no runtime integration to reverse. Do not delete the state directory when uninstalling. It contains historical drafts and exports and can be backed up as a whole while no writer is active. To revert to an earlier candidate, load the old content and save it as a new revision using the current revision as the expected value. Never rewind or edit the SQLite database to fake a revision.
+## Limitations
 
-No production install or uninstall has been executed. Native Codex runtime switching and rollback are outside this component's scope.
+- Function hooks are an early-access Claude Code feature; the installer turns them on.
+- Developed and used on Windows. CI runs the adapter's unit tests on Linux; a full install has only been run on the maintainer's machine.
+- Context can only be rewritten at compaction time; between compactions, only new output can be kept small.
+- The idle reminder has passed tests but has not yet been seen firing after a real idle period.
+- Messages and labels are in Traditional Chinese.
+- Not included from the private setup: recovering summary-dropped sentences with a local ranking model, and the control panel.
+- Codex: the native patches keep prepare, readback and automatic continuation disabled; end-to-end compaction and continuation are not verified. See [docs/HANDOFF_CORE.md](docs/HANDOFF_CORE.md).
 
-## Privacy and data handling
+## Privacy
 
-Draft history in SQLite and exported handoffs are stored as plaintext. Load, preview, export, and status output can contain handoff text or local paths. There is no secret detection or redaction. Choose a suitably protected local directory, review candidate content, and never commit or upload personal state or command output without checking it. Local-only operation does not mean encrypted storage.
+Everything runs locally and is stored as plain text: tool archives, saved originals, handoffs. Nothing is sent anywhere unless you set `CW_MODEL_CMD`, and then only to the command you chose. There is no secret redaction; protect the state directory accordingly.
 
-## Source, attribution, and validation
+## License
 
-See `SOURCE_MANIFEST.json`, `EXCLUSIONS.md`, and `LICENSE_REVIEW.md`. The published file set is deliberately limited to the handoff feature. No donor installer, UI, external model router, production receipt, transcript, or personal prompt is included. OpenAI upstream LICENSE and NOTICE are retained under `runtime-review/` alongside the patch.
-
-The standard GitHub Actions workflow checks Python and attempts focused Rust checks, tests, and a Codex CLI build against the exact pinned public upstream revision. A green Python job is not a native runtime pass. The workflow is not a full upstream test suite, production installation, Windows validation, remote readback validation, or automatic-continuation demonstration. See `CI_SCOPE.md`.
-
-## Native V2 and companion compatibility
-
-The current native source candidate is the base Gate B patch plus the minimal lockfile prerequisite plus `runtime-review-v2/patches/0002-atomic-store-and-thread-readback.patch` and `runtime-review-v2/patches/0003-Fix-handoff-storage-root-path-type.patch`, in that order. The V2 delta implements Unix atomic store publication and thread-scoped opaque-ID readback source, but does not enable native prepare, readback, binding application, or automatic continuation. Windows atomic publication explicitly returns Unsupported. See the [V2 scope and test report](runtime-review-v2/README.md).
-
-31 focused Linux tests passed in a production-module harness, including independent boundary tests. Those results are not full-crate compilation, Session integration, Windows, remote execution, or post-compaction end-to-end evidence. A full local locked build failed with SIGKILL in unchanged upstream codex-protocol before reaching the feature code. The first public CI run reached `codex-core` but failed with a return-type mismatch; native tests and CLI build did not run. The fourth patch corrects that one type mismatch. Its full native validation remains pending a new CI run.
-
-The Python draft/export interface remains usable for preparing candidate text. Its V1 `--binding` observer expects a path-and-SHA-1 binding file and does not interoperate with V2 opaque IDs and controlled readback. Do not use that observer's result as proof of V2 native connection. A separate opt-in offline V2 capture observer is included; it does not change the V1 interface or establish live native integration. See [ADAPTER-V2.md](ADAPTER-V2.md).
-
-### Optional offline V2 capture observer
-
-`python -m handoff_core.observation_v2` checks explicitly selected export bytes against a supplied captured prepare/read sequence using the native V2 opaque-ID contract. A successful result means only that the captured content matches the export. Receipt authenticity is unverified, freshness is unknown, and host execution and action authorization remain false/unverified. The command does not invoke native tools, perform compaction, fetch pages, or bypass the disabled gates. Supplied captures can be forged. See [the capture format and limitations](ADAPTER-V2.md).
-
-The combined Python suite has 25 passing synthetic tests (11 original plus 14 observer tests). These tests do not establish a live native connection, Session behavior, Windows or remote integration.
-
-## Compile correction
-
-The first public run ([37783812942](https://github.com/Ubadream/context-handoff/actions/runs/37783812942)) passed Python and found E0308 in the native `storage_root` return value. The additive `0003` patch converts the existing `AbsolutePathBuf` result to the declared `PathBuf`; it does not change storage policy or enable any gated behavior. See [the exact fix manifest](runtime-review-v2/COMPILE-FIX.json) and [CI scope](CI_SCOPE.md). A corrected source candidate is not a claim that the full native build or integration tests now pass.
+Apache-2.0. See `LICENSE`, `NOTICE` and [LICENSE_REVIEW.md](LICENSE_REVIEW.md). Release boundary: [EXCLUSIONS.md](EXCLUSIONS.md). Verification records: [VERIFICATION.md](VERIFICATION.md), [CI_SCOPE.md](CI_SCOPE.md).
