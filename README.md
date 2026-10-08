@@ -31,7 +31,7 @@ Long agent sessions hit the context limit, the host compacts, and then:
 
 ### Handoff core and native Codex patches (`handoff_core/`, `runtime-review*/`)
 
-The same flow also runs in the maintainer's Codex, through a private runtime overlay on Windows: the agent writes a handoff, calls `wife_compact(mode="prepare")` to bind it to the thread, then compacts with A or C and either continues or waits. In the maintainer's ten longest-running Codex threads, the host compacted 574 times on its own before the overlay went live on 2026-09-28. Since then there have been 406 compactions: 397 scheduled by the agent through `wife_compact` after binding its handoff (362 A, 35 C), 7 by the host, and 2 where the host compacted after a prepare but before the agent chose a mode. The patches here are the reviewed public extraction of that overlay. Prepare, readback and continuation ship switched off until they pass integration tests in public CI, and the hardened store has no Windows path yet (the private overlay writes through a temp file and rename there).
+The same flow also runs in the maintainer's Codex, through a private runtime overlay on Windows: the agent writes a handoff, calls `wife_compact(mode="prepare")` to bind it to the thread, then compacts with A or C and either continues or waits. In the maintainer's ten longest-running Codex threads, the host compacted 574 times on its own before the overlay went live on 2026-09-28. Since then there have been 406 compactions: 397 scheduled by the agent through `wife_compact` after binding its handoff (362 A, 35 C), 7 by the host, and 2 where the host compacted after a prepare but before the agent chose a mode. The patches here are the reviewed public extraction of that overlay. Patch 0004 opens prepare, readback and continuation on Unix and Windows. The tests that were ignored while they were closed now run: on Linux in public CI and on the maintainer's Windows machine; running them found and fixed two bugs. Windows also got the hardened store it was missing: the storage directory is opened one component at a time without following junctions or symlinks, and the binding is replaced in place relative to that held directory handle.
 
 A small standard-library Python component for revisioned handoff drafts, previews, deterministic exports and binding integrity checks, plus native Codex patches whose runtime gates are still closed. Details, safety properties and verification: [docs/HANDOFF_CORE.md](docs/HANDOFF_CORE.md).
 
@@ -78,7 +78,7 @@ State lives under `~/.local/state/wifeos/` (override with `CW_STATE_ROOT`).
 - The idle reminder has passed tests but has not yet been seen firing after a real idle period.
 - Messages and labels are in Traditional Chinese.
 - Not included from the private setup: recovering summary-dropped sentences with a local ranking model, and the control panel.
-- Codex: in this public extraction, prepare, readback and continuation are switched off and the hardened store returns Unsupported on Windows; end-to-end use so far is only in the private overlay. See [docs/HANDOFF_CORE.md](docs/HANDOFF_CORE.md).
+- Codex: the public patches are tested with Codex's own integration harness (mock model server), not yet in a long real session; end-to-end daily use so far is in the private overlay. Windows behaviour is tested on one machine, not in CI. One deny-read test cannot run on the CI runner, where Codex's filesystem sandbox helper aborts; upstream's own deny-read test fails the same way there. See [docs/HANDOFF_CORE.md](docs/HANDOFF_CORE.md).
 
 ## Privacy
 

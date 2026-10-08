@@ -1,5 +1,7 @@
 # Handoff core and native Codex patches (preview)
 
+> **Update 2026-10-09, patch 0004:** prepared handoffs, readback, binding loading and continuation are now open on Unix and Windows, and Windows has its own held-handle store. Statements below that these are "fixed disabled" describe the patches before 0004. See [VERIFICATION.md](VERIFICATION.md#patch-0004-prepared-handoffs-open) and [CI_SCOPE.md](CI_SCOPE.md).
+
 Experimental source preview. Original contributions use Apache-2.0, copyright 2026 Ubadream. This part of the repository combines a tested Python draft/export component with separately scoped, partially verified native Codex patches. It is not a production runtime or installer.
 
 ## Implemented scope

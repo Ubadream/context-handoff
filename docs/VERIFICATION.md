@@ -10,6 +10,14 @@
 
 Codex, private runtime overlay (not this repository's gated patches): in ten long-running threads, 574 host-initiated compactions before 2026-09-28; 406 after, 397 of them scheduled by the agent through `wife_compact` (362 A, 35 C). Counted from `compacted` events in the rollout files, deduplicated across forks, with the preceding `wife_compact` call in the same window.
 
+## Patch 0004: prepared handoffs open
+
+- Gate: `ensure_storage_available` opens on Unix and Windows and stays closed elsewhere; there is still no configuration or environment-variable bypass.
+- Linux, public CI on the `codex-prepare-unix` branch: focused locked compilation, the handoff integration tests (14 passed, 1 ignored), `handoff_store`, `handoff_stream`, `handoff_binding`, `checkpoint_reminder`, `no_follow_store`, `atomic_store`, hooks and config tests, and the debug CLI build. The first branch run exposed two failures in the previously ignored tests that also occur on Linux; both were fixed: blank handoff text created the handoff directory before being rejected, and the deny-read test set its policy in a way that never started a turn.
+- The deny-read test stays ignored in CI: Codex's filesystem sandbox helper aborts (SIGABRT) on the runner while loading AGENTS.md. An informational step ran it with `--ignored` next to upstream's own deny-read test `restricted_project_without_instructions_starts_successfully`; both failed the same way (exit 101).
+- Windows 10 (maintainer's machine, Rust 1.95.0, `RUST_MIN_STACK=8388608`): the same list passes, including 23 handoff integration tests (1 ignored), 6 `atomic_store` tests (three shared with Unix, plus a real junction, replacement while the old binding is open, and refusing existing entries) and 10 `no_follow` tests (1 ignored, needs symlink privilege). Found on the way: resolving a whole `\??\X:` path with `OBJ_DONT_REPARSE` fails on the drive-letter link itself, so the existing Windows no-follow helpers could not open real files; local disk paths now walk components, UNC paths keep the original single-shot open that refuses `\\host\pipe\...`.
+- Not verified: a long real Codex session on these public patches, macOS, Windows in CI, crash or power-loss durability.
+
 ## Handoff core and native Codex patches
 
 Verified on 2026-10-08, Python 3.12.14 on Linux:
