@@ -1,0 +1,113 @@
+{
+  "schema": "handoff-runtime-review/v1",
+  "component": "handoff-compaction-checkpoints",
+  "status": "EXPERIMENTAL_SOURCE_PREVIEW_NATIVE_DEPLOYMENT_BLOCKED",
+  "distribution": "Public experimental source; not a deployable runtime",
+  "upstream": {
+    "repository": "https://github.com/openai/codex",
+    "tag": "rust-v0.159.2",
+    "commit": "ff6aec96948b70d94983af2641a6b67c94faeff5",
+    "base_tree": "406dfdd5c68f303a3a8d04f32b3965b3b0ca0361"
+  },
+  "patch": {
+    "path": "patches/0001-handoff-compact-checkpoints.patch",
+    "sha256": "ed28854b7ee5e048620ce60ebaaea17cd58750350852bd4e5caad29c24b61e54",
+    "applied_tree": "cb01ad3e1c2a421b10b947c8e69d82b8d7cafd3d",
+    "changed_files": [
+      "codex-rs/config/src/config_toml.rs",
+      "codex-rs/core/config.schema.json",
+      "codex-rs/core/src/compact.rs",
+      "codex-rs/core/src/compact_remote_v2.rs",
+      "codex-rs/core/src/config/config_tests.rs",
+      "codex-rs/core/src/config/mod.rs",
+      "codex-rs/core/src/context/checkpoint_reminder.rs",
+      "codex-rs/core/src/context/contextual_user_message.rs",
+      "codex-rs/core/src/context/handoff_compact_notice.rs",
+      "codex-rs/core/src/context/mod.rs",
+      "codex-rs/core/src/handoff_binding.rs",
+      "codex-rs/core/src/handoff_binding_tests.rs",
+      "codex-rs/core/src/handoff_compact.rs",
+      "codex-rs/core/src/handoff_compact_tests.rs",
+      "codex-rs/core/src/hook_runtime.rs",
+      "codex-rs/core/src/lib.rs",
+      "codex-rs/core/src/session/checkpoint_reminder.rs",
+      "codex-rs/core/src/session/mod.rs",
+      "codex-rs/core/src/session/turn.rs",
+      "codex-rs/core/src/state/turn.rs",
+      "codex-rs/core/src/tools/handlers/handoff_compact.rs",
+      "codex-rs/core/src/tools/handlers/mod.rs",
+      "codex-rs/core/src/tools/spec_plan.rs",
+      "codex-rs/core/tests/suite/checkpoint_reminder.rs",
+      "codex-rs/core/tests/suite/handoff_compact.rs",
+      "codex-rs/core/tests/suite/handoff_compact_security.rs",
+      "codex-rs/core/tests/suite/mod.rs",
+      "codex-rs/exec-server/src/lib.rs",
+      "codex-rs/exec-server/src/no_follow/bounded_store_tests.rs",
+      "codex-rs/exec-server/src/no_follow/mod.rs",
+      "codex-rs/exec-server/src/no_follow/unix.rs",
+      "codex-rs/exec-server/src/no_follow/windows.rs",
+      "codex-rs/hooks/schema/generated/post-tool-use.command.input.schema.json",
+      "codex-rs/hooks/src/events/post_tool_use.rs",
+      "codex-rs/hooks/src/schema.rs"
+    ]
+  },
+  "license": {
+    "original_contributions": "Apache-2.0",
+    "attribution": "Copyright 2026 Ubadream",
+    "upstream_terms_preserved": true
+  },
+  "runtime_gates": {
+    "prepare": "disabled before source or store I/O",
+    "binding_load": "returns no binding before index I/O",
+    "continue_wait": "unavailable",
+    "bypass": "none"
+  },
+  "implemented_unverified": [
+    "execution-environment sandboxed source reading",
+    "bounded streaming and UTF-8 validation",
+    "exclusive create-new via existing no-follow platform helpers",
+    "bounded no-follow reads",
+    "source and archive no-follow handles",
+    "no-follow runtime directory creation",
+    "A/C scheduling and optional checkpoints"
+  ],
+  "unresolved": [
+    "safe atomic fixed-index publication",
+    "post-compaction readback from a remote executor",
+    "host-store adversarial mutation model and crash/race tests",
+    "all executable Rust verification"
+  ],
+  "requirements": {
+    "rust": "1.95.0",
+    "components": [
+      "clippy",
+      "rustfmt",
+      "rust-src"
+    ],
+    "test_runner": "cargo-nextest via just test",
+    "cargo_dependencies_changed": false,
+    "lockfile": "Apply 0000 prerequisite: 159 workspace-local versions synchronized; 1313 external records unchanged"
+  },
+  "test_status": {
+    "static": "STATIC_PASS_ONLY",
+    "rust_tests": "not executed",
+    "prepare_dependent_tests_ignored": 10,
+    "windows_reparse_test_ignored": 1
+  },
+  "artifact_allowlist": [
+    "LICENSE",
+    "NOTICE",
+    "README.md",
+    "UPSTREAM-LICENSE",
+    "UPSTREAM-NOTICE",
+    "VERIFICATION.json",
+    "patches/0001-handoff-compact-checkpoints.patch",
+    "MANIFEST.json",
+    "patches/0000-sync-workspace-release-lockfile.patch"
+  ],
+  "prerequisite": {
+    "path": "patches/0000-sync-workspace-release-lockfile.patch",
+    "sha256": "1b99ed3fc93196fac8535ab01b0f9d3dfedb9593eb071613e83c4568c9fc2d0d",
+    "resulting_lock_sha256": "e85460a5c2a1f92d73ca0a40219c846f6a10d729f3186667485372c3aa82cfbf"
+  }
+}

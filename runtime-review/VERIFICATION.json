@@ -1,0 +1,121 @@
+{
+  "status": "STATIC_PASS_ONLY",
+  "upstream_commit": "ff6aec96948b70d94983af2641a6b67c94faeff5",
+  "upstream_tree": "406dfdd5c68f303a3a8d04f32b3965b3b0ca0361",
+  "applied_tree": "cb01ad3e1c2a421b10b947c8e69d82b8d7cafd3d",
+  "patch_sha256": "ed28854b7ee5e048620ce60ebaaea17cd58750350852bd4e5caad29c24b61e54",
+  "changed_file_count": 35,
+  "changed_files": [
+    "codex-rs/config/src/config_toml.rs",
+    "codex-rs/core/config.schema.json",
+    "codex-rs/core/src/compact.rs",
+    "codex-rs/core/src/compact_remote_v2.rs",
+    "codex-rs/core/src/config/config_tests.rs",
+    "codex-rs/core/src/config/mod.rs",
+    "codex-rs/core/src/context/checkpoint_reminder.rs",
+    "codex-rs/core/src/context/contextual_user_message.rs",
+    "codex-rs/core/src/context/handoff_compact_notice.rs",
+    "codex-rs/core/src/context/mod.rs",
+    "codex-rs/core/src/handoff_binding.rs",
+    "codex-rs/core/src/handoff_binding_tests.rs",
+    "codex-rs/core/src/handoff_compact.rs",
+    "codex-rs/core/src/handoff_compact_tests.rs",
+    "codex-rs/core/src/hook_runtime.rs",
+    "codex-rs/core/src/lib.rs",
+    "codex-rs/core/src/session/checkpoint_reminder.rs",
+    "codex-rs/core/src/session/mod.rs",
+    "codex-rs/core/src/session/turn.rs",
+    "codex-rs/core/src/state/turn.rs",
+    "codex-rs/core/src/tools/handlers/handoff_compact.rs",
+    "codex-rs/core/src/tools/handlers/mod.rs",
+    "codex-rs/core/src/tools/spec_plan.rs",
+    "codex-rs/core/tests/suite/checkpoint_reminder.rs",
+    "codex-rs/core/tests/suite/handoff_compact.rs",
+    "codex-rs/core/tests/suite/handoff_compact_security.rs",
+    "codex-rs/core/tests/suite/mod.rs",
+    "codex-rs/exec-server/src/lib.rs",
+    "codex-rs/exec-server/src/no_follow/bounded_store_tests.rs",
+    "codex-rs/exec-server/src/no_follow/mod.rs",
+    "codex-rs/exec-server/src/no_follow/unix.rs",
+    "codex-rs/exec-server/src/no_follow/windows.rs",
+    "codex-rs/hooks/schema/generated/post-tool-use.command.input.schema.json",
+    "codex-rs/hooks/src/events/post_tool_use.rs",
+    "codex-rs/hooks/src/schema.rs"
+  ],
+  "checks_passed": [
+    "pinned upstream identity",
+    "clean full-checkout patch check and application",
+    "git diff --check",
+    "exact upstream license/notice copies",
+    "feature path allowlist",
+    "whole-patch private literal and fixture scan",
+    "source-read sandbox wiring",
+    "bounded accumulation before extension",
+    "fail-closed gate precedes I/O",
+    "path-based mutable index writer removed",
+    "configuration/hook schema JSON consistency"
+  ],
+  "not_run": [
+    "Rust compilation",
+    "Rust tests",
+    "rustfmt",
+    "Clippy",
+    "schema regeneration",
+    "Windows execution",
+    "remote execution",
+    "race/crash/atomic publication validation"
+  ],
+  "ignored_test_count": 11,
+  "ignored_tests": [
+    {
+      "path": "codex-rs/core/tests/suite/handoff_compact.rs",
+      "reason": "prepared handoffs are disabled until atomic index publication is implemented"
+    },
+    {
+      "path": "codex-rs/core/tests/suite/handoff_compact.rs",
+      "reason": "prepared handoffs are disabled until atomic index publication is implemented"
+    },
+    {
+      "path": "codex-rs/core/tests/suite/handoff_compact.rs",
+      "reason": "prepared handoffs are disabled until atomic index publication is implemented"
+    },
+    {
+      "path": "codex-rs/core/tests/suite/handoff_compact.rs",
+      "reason": "prepared handoffs are disabled until atomic index publication is implemented"
+    },
+    {
+      "path": "codex-rs/core/tests/suite/handoff_compact.rs",
+      "reason": "prepared handoffs are disabled until atomic index publication is implemented"
+    },
+    {
+      "path": "codex-rs/core/tests/suite/handoff_compact_security.rs",
+      "reason": "prepared handoffs are disabled until atomic index publication is implemented"
+    },
+    {
+      "path": "codex-rs/core/tests/suite/handoff_compact_security.rs",
+      "reason": "prepared handoffs are disabled until atomic index publication is implemented"
+    },
+    {
+      "path": "codex-rs/core/tests/suite/handoff_compact_security.rs",
+      "reason": "prepared handoffs are disabled until atomic index publication is implemented"
+    },
+    {
+      "path": "codex-rs/core/tests/suite/handoff_compact_security.rs",
+      "reason": "prepared handoffs are disabled until atomic index publication is implemented"
+    },
+    {
+      "path": "codex-rs/core/tests/suite/handoff_compact_security.rs",
+      "reason": "prepared handoffs are disabled until atomic index publication is implemented"
+    },
+    {
+      "path": "codex-rs/exec-server/src/no_follow/bounded_store_tests.rs",
+      "reason": "requires Windows symlink privilege or developer mode; run explicitly in Windows security CI"
+    }
+  ],
+  "release_status": "SECURITY_BLOCKED_NOT_COMPILED",
+  "remaining_blockers": [
+    "atomic no-follow snapshot-index publication unavailable",
+    "thread-bound remote readback unresolved",
+    "compiled/runtime validation absent"
+  ]
+}
