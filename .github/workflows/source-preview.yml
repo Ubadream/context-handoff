@@ -1,0 +1,96 @@
+name: Experimental source checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  python:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Synthetic Python tests and CLI
+        run: |
+          python3 --version
+          python3 -m unittest discover -s tests -v
+          python3 -m handoff_core --help
+  native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_PROFILE_DEV_SPLIT_DEBUGINFO: 'off'
+      RUST_MIN_STACK: '8388608'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Checkout exact public upstream
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: openai/codex
+          ref: ff6aec96948b70d94983af2641a6b67c94faeff5
+          path: upstream
+          persist-credentials: false
+          submodules: false
+      - name: Verify and apply reviewed patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '1b99ed3fc93196fac8535ab01b0f9d3dfedb9593eb071613e83c4568c9fc2d0d  runtime-review/patches/0000-sync-workspace-release-lockfile.patch' | sha256sum -c -
+          echo 'ed28854b7ee5e048620ce60ebaaea17cd58750350852bd4e5caad29c24b61e54  runtime-review/patches/0001-handoff-compact-checkpoints.patch' | sha256sum -c -
+          test "$(git -C upstream rev-parse HEAD)" = ff6aec96948b70d94983af2641a6b67c94faeff5
+          echo '82a42653f77077507f834af350f8458d7909af152ea9c2d6874bc759411f61f6  runtime-review-v2/patches/0002-atomic-store-and-thread-readback.patch' | sha256sum -c -
+          git -C upstream apply --check ../runtime-review/patches/0001-handoff-compact-checkpoints.patch
+          git -C upstream apply ../runtime-review/patches/0001-handoff-compact-checkpoints.patch
+          git -C upstream apply --check ../runtime-review/patches/0000-sync-workspace-release-lockfile.patch
+          git -C upstream apply ../runtime-review/patches/0000-sync-workspace-release-lockfile.patch
+          git -C upstream apply --check ../runtime-review-v2/patches/0002-atomic-store-and-thread-readback.patch
+          git -C upstream apply ../runtime-review-v2/patches/0002-atomic-store-and-thread-readback.patch
+          git -C upstream add -A
+          test "$(git -C upstream write-tree)" = a28cfbae42e0dcfe1533a410adc001ff3f9b2f5e
+          git -C upstream diff --cached --check
+          echo 'e85460a5c2a1f92d73ca0a40219c846f6a10d729f3186667485372c3aa82cfbf  upstream/codex-rs/Cargo.lock' | sha256sum -c -
+      - name: Install required Ubuntu build headers
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libcap-dev
+      - name: Install exact official Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal
+      - name: Focused locked compilation
+        working-directory: upstream/codex-rs
+        run: cargo +1.95.0 check --locked -p codex-core -p codex-hooks -p codex-config -p codex-exec-server
+      - name: Focused native tests (disabled cases remain ignored)
+        working-directory: upstream/codex-rs
+        run: |
+          set -euo pipefail
+          cargo +1.95.0 test --locked -p codex-core handoff_compact
+          cargo +1.95.0 test --locked -p codex-core handoff_binding
+          cargo +1.95.0 test --locked -p codex-core checkpoint_reminder
+          cargo +1.95.0 test --locked -p codex-exec-server no_follow_store
+          cargo +1.95.0 test --locked -p codex-exec-server --lib atomic_store
+          cargo +1.95.0 test --locked -p codex-core --lib handoff_store
+          cargo +1.95.0 test --locked -p codex-core --lib handoff_stream
+          cargo +1.95.0 test --locked -p codex-hooks command_input_reports_native_checkpoint_owner_only_when_enabled
+          cargo +1.95.0 test --locked -p codex-config
+      - name: Build CLI (debug profile, not a distribution)
+        working-directory: upstream/codex-rs
+        run: cargo +1.95.0 build --locked -p codex-cli --bin codex
+      - name: State experimental limitations
+        if: always()
+        run: |
+          echo 'Source preview only. Native prepare, controlled readback, binding loading, and prepared-handoff continuation remain fixed disabled.' >> "$GITHUB_STEP_SUMMARY"
+          echo '11 test sources ignored: 10 prepare-dependent and 1 Windows privilege-dependent. No Windows, remote readback, production install, release-profile build, or full upstream test-suite validation.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Check each step conclusion. An attempted build is not a pass; a green job does not enable disabled behavior.' >> "$GITHUB_STEP_SUMMARY"
