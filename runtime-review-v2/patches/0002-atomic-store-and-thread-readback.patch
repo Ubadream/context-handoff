@@ -1,0 +1,2320 @@
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index b7809a6765b94f038458a31e199b02f6b24d45df..ed2b1e4d29cb422b5a9ad3caff5e578a973620c5 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -357,7 +357,11 @@ async fn run_compact_task_inner_impl(
+     let mut user_messages = collect_annotated_user_messages(history_items);
+     let handoff = crate::handoff_binding::load(&sess, &turn_context)
+         .await
+-        .map_err(|e| CodexErr::InvalidRequest(format!("Handoff could not be loaded; history was not replaced: {e}")))?;
++        .map_err(|e| {
++            CodexErr::InvalidRequest(format!(
++                "Handoff could not be loaded; history was not replaced: {e}"
++            ))
++        })?;
+     if handoff.is_some() {
+         user_messages.pop();
+     }
+diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
+index e61c562b40de693f2dc517d379cfa56f5d954e68..825581e449c09d97cc3599279c4cc28a88a96b5f 100644
+--- a/codex-rs/core/src/compact_remote_v2.rs
++++ b/codex-rs/core/src/compact_remote_v2.rs
+@@ -321,7 +321,11 @@ async fn run_remote_compact_task_inner_impl(
+     );
+     if let Some(handoff) = crate::handoff_binding::load(sess, turn_context)
+         .await
+-        .map_err(|e| CodexErr::InvalidRequest(format!("Handoff could not be loaded; history was not replaced: {e}")))?
++        .map_err(|e| {
++            CodexErr::InvalidRequest(format!(
++                "Handoff could not be loaded; history was not replaced: {e}"
++            ))
++        })?
+     {
+         crate::handoff_binding::remove_covered(&handoff, &mut compacted_history);
+         crate::handoff_binding::append(sess, &handoff, &mut compacted_history).await;
+diff --git a/codex-rs/core/src/context/checkpoint_reminder.rs b/codex-rs/core/src/context/checkpoint_reminder.rs
+index d58fa369dd39f0fcc5220f6e90d449fdf1264ddd..4687a8d80f852c6709d03d7db22e4887ff59b2f3 100644
+--- a/codex-rs/core/src/context/checkpoint_reminder.rs
++++ b/codex-rs/core/src/context/checkpoint_reminder.rs
+@@ -27,19 +27,33 @@ impl ContextualUserFragment for CheckpointReminder {
+     }
+ 
+     fn type_markers() -> (&'static str, &'static str) {
+-        ("<context_checkpoint_reminder>", "</context_checkpoint_reminder>")
++        (
++            "<context_checkpoint_reminder>",
++            "</context_checkpoint_reminder>",
++        )
+     }
+ 
+     fn body(&self) -> String {
+         let Self {
+-            window_id, thread_id, used, threshold, compact_threshold, review_threshold,
++            window_id,
++            thread_id,
++            used,
++            threshold,
++            compact_threshold,
++            review_threshold,
+         } = self;
+         let action = if review_threshold == &Some(*threshold) {
+-            format!("Reached {threshold} tokens. Review task completion. Pending reviews, unfinished tests, and unsaved outputs are not complete. If authorized work remains, continue it; this review does not require compaction or authorize new work.")
++            format!(
++                "Reached {threshold} tokens. Review task completion. Pending reviews, unfinished tests, and unsaved outputs are not complete. If authorized work remains, continue it; this review does not require compaction or authorize new work."
++            )
+         } else if threshold == compact_threshold {
+-            format!("Reached {threshold} tokens. Save changes, read back the existing project handoff, and request A or C compaction at the next safe boundary. Finish in-flight operations before starting another work stage.")
++            format!(
++                "Reached {threshold} tokens. Save changes, read back the existing project handoff, and request A or C compaction at the next safe boundary. Finish in-flight operations before starting another work stage."
++            )
+         } else {
+-            format!("Reached {threshold} tokens. Update and read back the handoff. Preserve references to details still needed. If the next operation may exceed {compact_threshold} tokens, compact at a safe boundary first; otherwise continue within existing authorization.")
++            format!(
++                "Reached {threshold} tokens. Update and read back the handoff. Preserve references to details still needed. If the next operation may exceed {compact_threshold} tokens, compact at a safe boundary first; otherwise continue within existing authorization."
++            )
+         };
+         let handoff_scope = if review_threshold == &Some(*threshold) {
+             "Follow the handoff steps only when there are changes to preserve or compaction is appropriate. "
+diff --git a/codex-rs/core/src/context/mod.rs b/codex-rs/core/src/context/mod.rs
+index 5368641de4eff6f1c0d2023f3bf81d0587b9e5e3..60ef8d97f9bcd799cfd323786c6e51e10d3672f7 100644
+--- a/codex-rs/core/src/context/mod.rs
++++ b/codex-rs/core/src/context/mod.rs
+@@ -26,6 +26,7 @@ mod guardian_retained_instructions;
+ mod guardian_review_evidence;
+ mod guardian_sender_messages;
+ mod guardian_tool_descriptions;
++mod handoff_compact_notice;
+ mod hook_additional_context;
+ mod image_resize_notice;
+ mod inter_agent_completion_message;
+@@ -54,7 +55,6 @@ mod unsupported_media;
+ mod user_instructions;
+ mod user_shell_command;
+ mod user_verification_notice;
+-mod handoff_compact_notice;
+ pub(crate) use handoff_compact_notice::HandoffCompactNotice;
+ pub(crate) mod world_state;
+ 
+diff --git a/codex-rs/core/src/handoff_binding.rs b/codex-rs/core/src/handoff_binding.rs
+index bcf03e528935435d23abd3451562eb01d9a18d4e..b538b314c36b4f78f67e44bbaa7f1bba5bd8c2dc 100644
+--- a/codex-rs/core/src/handoff_binding.rs
++++ b/codex-rs/core/src/handoff_binding.rs
+@@ -1,63 +1,60 @@
+ // Copyright 2026 Ubadream
+ // SPDX-License-Identifier: Apache-2.0
+ 
+-//! Task-bound handoff for the last request, independent of the summary writer.
++//! Session-authorized handoff binding and thread-scoped readback.
+ use crate::compact::is_summary_message;
+ use crate::context::ContextualUserFragment;
+ use crate::context::HandoffCompactNotice;
++use crate::handoff_store::Durability;
++use crate::handoff_store::HistoricalPage;
++use crate::handoff_store::Store;
++use crate::handoff_store::digest;
+ use crate::session::session::Session;
+ use crate::session::turn_context::TurnContext;
+ use anyhow::Context;
+ use anyhow::bail;
++use codex_exec_server::NoFollowDirectory;
+ use codex_history::ResponseItemEnvelope;
+ use codex_protocol::items::TurnItem;
+ use codex_protocol::models::ContentItem;
+ use codex_protocol::models::ResponseItem;
+-use serde::Deserialize;
+-use serde::Serialize;
+-use sha1::Digest;
+-use sha1::Sha1;
+-use std::io::Write;
+-use std::path::Path;
+ use std::path::PathBuf;
++use tokio_util::sync::CancellationToken;
++use uuid::Uuid;
+ 
+-pub(crate) const MAX_HANDOFF_BYTES: u64 = 32 * 1024;
++pub(crate) use crate::handoff_store::Binding;
++pub(crate) use crate::handoff_store::Continuation;
++pub(crate) use crate::handoff_store::MAX_HANDOFF_BYTES;
+ 
+-/// Fixed-index publication is intentionally unavailable until a cross-platform,
+-/// directory-handle-anchored atomic replace operation has been implemented and tested.
+-/// There is no configuration or environment-variable bypass for this gate.
+-pub(crate) fn ensure_storage_available() -> anyhow::Result<()> {
+-    bail!("Prepared handoffs are disabled pending atomic no-follow snapshot-index publication")
+-}
+-
+-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+-#[serde(rename_all = "snake_case")]
+-pub(crate) enum Continuation {
+-    Continue,
+-    Wait,
+-}
+-
+-#[derive(Deserialize, Serialize)]
+-pub(crate) struct Binding {
+-    thread_id: String,
+-    source_message_id: String,
+-    source_text_sha1: String,
+-    pub(crate) handoff_path: PathBuf,
+-    handoff_sha1: String,
+-    continuation: Continuation,
++pub(crate) struct PreparedTurn {
++    pub(crate) binding: Binding,
++    pub(crate) durability: Durability,
++    pub(crate) requesting_turn_active: bool,
++    pub(crate) covers_current_request: bool,
+ }
+ 
+-fn digest(text: &str) -> String {
+-    // Change detection for local owned files, not authentication of untrusted data.
+-    format!("{:x}", Sha1::digest(text.as_bytes()))
++pub(crate) async fn requesting_turn_is_active(
++    sess: &Session,
++    turn: &TurnContext,
++    cancellation: &CancellationToken,
++) -> bool {
++    if cancellation.is_cancelled() {
++        return false;
++    }
++    let active = sess.active_turn.lock().await;
++    !cancellation.is_cancelled()
++        && active
++            .as_ref()
++            .and_then(|active| active.task.as_ref())
++            .is_some_and(|task| task.turn_context.sub_id == turn.sub_id)
+ }
+ 
+-fn read_bounded(path: &Path) -> anyhow::Result<String> {
+-    let text = codex_exec_server::read_bounded_file_no_follow(path, MAX_HANDOFF_BYTES)?;
+-    if text.trim().is_empty() {
+-        bail!("Handoff must not be empty");
+-    }
+-    Ok(text)
++/// Native integration and platform verification are still required. This gate
++/// has no configuration or environment-variable bypass.
++pub(crate) fn ensure_storage_available() -> anyhow::Result<()> {
++    bail!(
++        "Prepared handoffs are disabled pending atomic no-follow storage and native integration validation"
++    )
+ }
+ 
+ pub(crate) fn request_text(item: &ResponseItem) -> Option<String> {
+@@ -78,26 +75,38 @@ async fn last_request(sess: &Session) -> Option<(String, String)> {
+     })
+ }
+ 
+-/// Freeze handoff text already read through the selected environment's filesystem policy.
+-/// The caller must not pass text from an unrestricted host-path read.
++fn storage_root(sess: &Session, turn: &TurnContext) -> PathBuf {
++    turn.config
++        .codex_home
++        .join("handoff-compact/handoffs")
++        .join(sess.thread_id.to_string())
++}
++
++fn open_store(sess: &Session, turn: &TurnContext) -> anyhow::Result<Option<Store>> {
++    let directory = match NoFollowDirectory::open(&storage_root(sess, turn)) {
++        Ok(directory) => directory,
++        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
++        Err(error) => return Err(error.into()),
++    };
++    Store::new(directory, &sess.thread_id.to_string()).map(Some)
++}
++
++/// The source text has already passed the selected executor's filesystem policy.
+ pub(crate) async fn prepare(
+     sess: &Session,
+     turn: &TurnContext,
+     text: &str,
+     continuation: Continuation,
+-) -> anyhow::Result<Binding> {
++    cancellation: &CancellationToken,
++) -> anyhow::Result<PreparedTurn> {
+     ensure_storage_available()?;
+-    if text.len() as u64 > MAX_HANDOFF_BYTES || text.trim().is_empty() {
+-        bail!("Handoff must contain non-empty UTF-8 text of at most 32 KiB");
+-    }
+-    let (source_message_id, source_text_sha1) = last_request(sess)
++    let expected = last_request(sess)
+         .await
+-        .context("No user request in this thread can be bound")?;
+-    let root = turn
+-        .config
+-        .codex_home
+-        .join("handoff-compact/handoffs")
+-        .join(sess.thread_id.to_string());
++        .context("No current user request can be bound")?;
++    if !requesting_turn_is_active(sess, turn, cancellation).await {
++        bail!("Requesting turn is no longer active; no handoff was written");
++    }
++    let root = storage_root(sess, turn);
+     if root.to_string_lossy().len() > 1024 {
+         bail!("Handoff directory path is too long");
+     }
+@@ -109,69 +118,57 @@ pub(crate) async fn prepare(
+             follow_symlinks: false,
+         },
+         /*sandbox*/ None,
+-    ).await?;
+-    let snapshot = root.join(format!("{}.md", uuid::Uuid::new_v4()));
+-    let mut file = codex_exec_server::create_new_file_no_follow(&snapshot)?;
+-    file.write_all(text.as_bytes())?;
+-    file.sync_all()?;
+-    if read_bounded(&snapshot)? != text {
+-        bail!("Handoff snapshot read-back did not match");
+-    }
+-    let binding = Binding {
+-        thread_id: sess.thread_id.to_string(),
+-        source_message_id,
+-        source_text_sha1,
+-        handoff_path: snapshot.to_path_buf(),
+-        handoff_sha1: digest(text),
+-        continuation,
+-    };
+-    // Never fall back to path-based tempfile/rename or truncate an existing index.
+-    // Keep the immutable snapshot unreferenced until a safe atomic index writer exists.
+-    let _ = binding;
+-    bail!("Atomic handoff-index publication is not implemented")
++    )
++    .await?;
++    let store = open_store(sess, turn)?.context("Handoff directory is unavailable")?;
++    let text = text.to_owned();
++    let (source_id, source_digest) = expected.clone();
++    let prepared = tokio::task::spawn_blocking(move || {
++        store.prepare(&source_id, &source_digest, &text, continuation)
++    })
++    .await??;
++    let covers_current_request = last_request(sess).await == Some(expected);
++    let requesting_turn_active = requesting_turn_is_active(sess, turn, cancellation).await;
++    // Publication may already have completed. Report its actual state even when
++    // cancellation or a newer request makes it unsuitable for compaction.
++    Ok(PreparedTurn {
++        binding: prepared.binding,
++        durability: prepared.durability,
++        requesting_turn_active,
++        covers_current_request,
++    })
+ }
+ 
+ pub(crate) async fn load(sess: &Session, turn: &TurnContext) -> anyhow::Result<Option<Binding>> {
+     if ensure_storage_available().is_err() {
+-        // Ordinary native compaction must keep the original user request when the
+-        // optional handoff store is unavailable, without touching any saved index.
++        // Native compaction keeps its original request-handling path without reading storage.
+         return Ok(None);
+     }
+-    let root = turn
+-        .config
+-        .codex_home
+-        .join("handoff-compact/handoffs")
+-        .join(sess.thread_id.to_string());
+-    let text = match read_bounded(&root.join("binding.json")) {
+-        Ok(text) => text,
+-        Err(error)
+-            if error
+-                .downcast_ref::<std::io::Error>()
+-                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+-        {
+-            return Ok(None);
+-        }
+-        Err(error) => return Err(error),
++    let Some(expected) = last_request(sess).await else {
++        return Ok(None);
+     };
+-    let binding: Binding = serde_json::from_str(&text)?;
+-    if binding.thread_id != sess.thread_id.to_string()
+-        || binding.handoff_path.parent() != Some(root.as_path())
+-    {
+-        bail!("Handoff binding does not belong to this thread");
+-    }
+-    if last_request(sess).await
+-        != Some((
+-            binding.source_message_id.clone(),
+-            binding.source_text_sha1.clone(),
+-        ))
+-    {
+-        // A newer request must never be replaced by a handoff for an older one.
++    let Some(store) = open_store(sess, turn)? else {
++        return Ok(None);
++    };
++    let (source_id, source_digest) = expected.clone();
++    let binding =
++        tokio::task::spawn_blocking(move || store.binding_for_request(&source_id, &source_digest))
++            .await??;
++    if last_request(sess).await != Some(expected) {
+         return Ok(None);
+     }
+-    if digest(&read_bounded(&binding.handoff_path)?) != binding.handoff_sha1 {
+-        bail!("Handoff snapshot changed; keep the original request and reject this binding");
+-    }
+-    Ok(Some(binding))
++    Ok(binding)
++}
++
++pub(crate) async fn read_current_page(
++    sess: &Session,
++    turn: &TurnContext,
++    handoff_id: Uuid,
++    offset: usize,
++) -> anyhow::Result<HistoricalPage> {
++    ensure_storage_available()?;
++    let store = open_store(sess, turn)?.context("No current thread handoff")?;
++    tokio::task::spawn_blocking(move || store.read_current_page(handoff_id, offset)).await?
+ }
+ 
+ pub(crate) async fn append(
+@@ -180,12 +177,16 @@ pub(crate) async fn append(
+     history: &mut Vec<ResponseItemEnvelope>,
+ ) {
+     let next = match binding.continuation {
+-        Continuation::Continue => "Read the handoff and continue only unfinished work already authorized by the user.",
+-        Continuation::Wait => "Read the handoff to confirm the stopping point. Work is complete or awaiting the user decision; do not start new work.",
++        Continuation::Continue => {
++            "Read the handoff and continue only unfinished work already authorized by the user."
++        }
++        Continuation::Wait => {
++            "Read the handoff to confirm the stopping point. Work is complete or awaiting the user decision; do not start new work."
++        }
+     };
+     history.push(ResponseItemEnvelope::new(ContextualUserFragment::into(HandoffCompactNotice(format!(
+-        "Compaction complete. Handoff for thread {}: {} (content fingerprint {}). {next} The handoff records the request and completed and unfinished work. Original text remains in the source rollout as historical data. Newer user messages take precedence.",
+-        binding.thread_id, binding.handoff_path.display(), binding.handoff_sha1,
++        "Compaction complete. Handoff for thread {} has opaque ID {}. Use handoff_compact read with this handoff_id to retrieve bounded historical-data pages. {next} The handoff records the request and completed and unfinished work. Original text remains in the source rollout as historical data. Newer user messages take precedence.",
++        binding.thread_id, binding.handoff_id,
+     )))));
+     let turn_state = {
+         let active = sess.active_turn.lock().await;
+diff --git a/codex-rs/core/src/handoff_binding_tests.rs b/codex-rs/core/src/handoff_binding_tests.rs
+index 6b47af103d45298899ff4ad1fa51c4e0d6b7f405..292697d05113a8464e7d843ef7d252b93cca9145 100644
+--- a/codex-rs/core/src/handoff_binding_tests.rs
++++ b/codex-rs/core/src/handoff_binding_tests.rs
+@@ -7,14 +7,16 @@ use serde_json::json;
+ 
+ #[test]
+ fn remote_handoff_replaces_only_bound_identity_and_preserves_media() {
+-    let binding = Binding {
+-        thread_id: "task".to_string(),
+-        source_message_id: "msg_latest".to_string(),
+-        source_text_sha1: digest("repeated words"),
+-        handoff_path: PathBuf::from("handoff.md"),
+-        handoff_sha1: digest("handoff"),
+-        continuation: Continuation::Continue,
+-    };
++    let binding: Binding = serde_json::from_value(json!({
++        "schema_version": 1,
++        "thread_id": uuid::Uuid::new_v4().to_string(),
++        "source_message_id": "msg_latest",
++        "source_text_sha1": digest("repeated words"),
++        "handoff_id": uuid::Uuid::new_v4(),
++        "handoff_sha1": digest("handoff"),
++        "continuation": "continue",
++    }))
++    .unwrap();
+     let older: ResponseItem = serde_json::from_value(json!({
+         "type":"message", "role":"user", "id":"msg_older",
+         "content":[{"type":"input_text","text":"repeated words"}]
+@@ -45,15 +47,3 @@ fn remote_handoff_replaces_only_bound_identity_and_preserves_media() {
+     remove_covered(&binding, &mut old_only);
+     assert_eq!(old_only[0].item, older);
+ }
+-
+-#[test]
+-fn handoff_read_rejects_empty_and_oversize_instead_of_truncating() {
+-    let dir = tempfile::tempdir().unwrap();
+-    let path = dir.path().join("handoff.md");
+-    std::fs::write(&path, " ").unwrap();
+-    assert!(read_bounded(&path).is_err());
+-    std::fs::write(&path, "x".repeat(MAX_HANDOFF_BYTES as usize + 1)).unwrap();
+-    assert!(read_bounded(&path).is_err());
+-    std::fs::write(&path, "Synthetic request and continuation point").unwrap();
+-    assert_eq!(read_bounded(&path).unwrap(), "Synthetic request and continuation point");
+-}
+diff --git a/codex-rs/core/src/handoff_compact.rs b/codex-rs/core/src/handoff_compact.rs
+index 8e35a7cafad832bcbac0ac40d4559cb3b42b87b2..782a3f793fbfbf190171117441e4ae0a98cef3cf 100644
+--- a/codex-rs/core/src/handoff_compact.rs
++++ b/codex-rs/core/src/handoff_compact.rs
+@@ -21,6 +21,8 @@ pub(crate) enum Mode {
+     C,
+     #[serde(rename = "prepare")]
+     Prepare,
++    #[serde(rename = "read")]
++    Read,
+     #[serde(rename = "cancel")]
+     Cancel,
+ }
+@@ -52,7 +54,8 @@ pub(crate) async fn archive(sess: &Session, turn: &TurnContext) -> CodexResult<P
+             follow_symlinks: false,
+         },
+         /*sandbox*/ None,
+-    ).await?;
++    )
++    .await?;
+     let path = directory.join(format!("{}_{}.jsonl", sess.thread_id, uuid::Uuid::new_v4()));
+     tokio::task::spawn_blocking(move || {
+         export_originals(std::path::Path::new(&source), &sid, path.as_path())
+@@ -98,11 +101,10 @@ fn export_originals(
+     sid: &str,
+     path: &std::path::Path,
+ ) -> CodexResult<PathBuf> {
+-    let mut records =
+-        serde_json::Deserializer::from_reader(BufReader::new(
+-            codex_exec_server::open_regular_file_no_follow(source)?,
+-        ))
+-            .into_iter::<ArchiveRecord>();
++    let mut records = serde_json::Deserializer::from_reader(BufReader::new(
++        codex_exec_server::open_regular_file_no_follow(source)?,
++    ))
++    .into_iter::<ArchiveRecord>();
+     let header = records
+         .next()
+         .transpose()?
+diff --git a/codex-rs/core/src/handoff_store.rs b/codex-rs/core/src/handoff_store.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..202084ae602a11cfea10d47f9b9089dac3f31864
+--- /dev/null
++++ b/codex-rs/core/src/handoff_store.rs
+@@ -0,0 +1,266 @@
++// Copyright 2026 Ubadream
++// SPDX-License-Identifier: Apache-2.0
++
++//! Thread-scoped handoff records stored through held no-follow directory handles.
++//! The caller supplies the authenticated session identity, never a tool argument.
++
++use anyhow::bail;
++use codex_exec_server::AtomicPublication;
++use codex_exec_server::NoFollowDirectory;
++use serde::Deserialize;
++use serde::Serialize;
++use sha1::Digest;
++use sha1::Sha1;
++use std::io;
++use std::io::Write;
++use uuid::Uuid;
++
++pub(crate) const MAX_HANDOFF_BYTES: u64 = 32 * 1024;
++const MAX_BINDING_BYTES: u64 = 8 * 1024;
++const MAX_SOURCE_ID_BYTES: usize = 1024;
++const PAGE_BYTES: usize = 4 * 1024;
++// JSON escaping can expand a control byte to six bytes. Bound the actual
++// serialized page, leaving room for the tool envelope below 8 KiB of visible text.
++const MAX_PAGE_JSON_BYTES: usize = 7 * 1024;
++const MAX_TOOL_RESULT_BYTES: usize = 8 * 1024;
++
++#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
++#[serde(rename_all = "snake_case")]
++pub(crate) enum Continuation {
++    Continue,
++    Wait,
++}
++
++#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
++#[serde(deny_unknown_fields)]
++pub(crate) struct Binding {
++    schema_version: u8,
++    pub(crate) thread_id: String,
++    pub(crate) source_message_id: String,
++    source_text_sha1: String,
++    pub(crate) handoff_id: Uuid,
++    handoff_sha1: String,
++    pub(crate) continuation: Continuation,
++}
++
++#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
++#[serde(rename_all = "snake_case")]
++pub(crate) enum Durability {
++    Confirmed,
++    VisibleUnconfirmed,
++}
++
++#[derive(Debug)]
++pub(crate) struct Preparation {
++    pub(crate) binding: Binding,
++    pub(crate) durability: Durability,
++}
++
++#[derive(Debug, Serialize, PartialEq, Eq)]
++pub(crate) struct HistoricalPage {
++    pub(crate) handoff_id: Uuid,
++    pub(crate) historical_data: bool,
++    pub(crate) source_message_id: String,
++    pub(crate) offset: usize,
++    pub(crate) next_offset: Option<usize>,
++    pub(crate) total_bytes: usize,
++    pub(crate) content_sha1: String,
++    pub(crate) text: String,
++}
++
++pub(crate) struct Store {
++    directory: NoFollowDirectory,
++    thread_id: String,
++}
++
++pub(crate) fn digest(text: &str) -> String {
++    // Local change detection only. This does not authenticate hostile same-UID writers.
++    format!("{:x}", Sha1::digest(text.as_bytes()))
++}
++
++pub(crate) fn serialize_read_result(page: &HistoricalPage) -> anyhow::Result<String> {
++    let output = serde_json::json!({
++        "handoff_page": page,
++        "content_kind": "historical_data",
++        "durability": "confirmed_on_read",
++    })
++    .to_string();
++    if output.len() > MAX_TOOL_RESULT_BYTES {
++        bail!("Serialized handoff tool result exceeds 8 KiB");
++    }
++    Ok(output)
++}
++
++impl Store {
++    pub(crate) fn new(directory: NoFollowDirectory, thread_id: &str) -> anyhow::Result<Self> {
++        let thread_id = Uuid::parse_str(thread_id)?.to_string();
++        Ok(Self {
++            directory,
++            thread_id,
++        })
++    }
++
++    pub(crate) fn prepare(
++        &self,
++        source_message_id: &str,
++        source_text_sha1: &str,
++        text: &str,
++        continuation: Continuation,
++    ) -> anyhow::Result<Preparation> {
++        if text.trim().is_empty() || text.len() as u64 > MAX_HANDOFF_BYTES {
++            bail!("Handoff must contain non-empty UTF-8 text of at most 32 KiB");
++        }
++        if source_message_id.is_empty()
++            || source_message_id.len() > MAX_SOURCE_ID_BYTES
++            || !is_digest(source_text_sha1)
++        {
++            bail!("Invalid source request identity");
++        }
++        let binding = Binding {
++            schema_version: 1,
++            thread_id: self.thread_id.clone(),
++            source_message_id: source_message_id.to_string(),
++            source_text_sha1: source_text_sha1.to_string(),
++            handoff_id: Uuid::new_v4(),
++            handoff_sha1: digest(text),
++            continuation,
++        };
++        let record = serde_json::to_vec(&binding)?;
++        if record.len() as u64 > MAX_BINDING_BYTES {
++            bail!("Handoff binding exceeds its storage bound");
++        }
++        let leaf = format!("{}.md", binding.handoff_id);
++        let mut snapshot = self.directory.create_new(&leaf)?;
++        snapshot.write_all(text.as_bytes())?;
++        snapshot.sync_all()?;
++        self.directory.sync()?;
++        if self.directory.read_bounded(&leaf, MAX_HANDOFF_BYTES)? != text {
++            bail!("Handoff snapshot read-back did not match");
++        }
++        let durability = match self.directory.publish("binding.json", &record)? {
++            AtomicPublication::Durable => Durability::Confirmed,
++            AtomicPublication::VisibleButDurabilityUnconfirmed(_error) => {
++                Durability::VisibleUnconfirmed
++            }
++        };
++        Ok(Preparation {
++            binding,
++            durability,
++        })
++    }
++
++    pub(crate) fn binding_for_request(
++        &self,
++        source_message_id: &str,
++        source_text_sha1: &str,
++    ) -> anyhow::Result<Option<Binding>> {
++        let Some(binding) = self.read_binding()? else {
++            return Ok(None);
++        };
++        if binding.source_message_id != source_message_id
++            || binding.source_text_sha1 != source_text_sha1
++        {
++            return Ok(None);
++        }
++        self.read_snapshot(&binding)?;
++        // A previous post-rename sync error is reconciled through a real sync,
++        // never a second blind write of the index.
++        self.directory.sync()?;
++        if self.read_binding()?.as_ref() != Some(&binding) {
++            bail!("Handoff binding changed during verification");
++        }
++        Ok(Some(binding))
++    }
++
++    pub(crate) fn read_current_page(
++        &self,
++        handoff_id: Uuid,
++        offset: usize,
++    ) -> anyhow::Result<HistoricalPage> {
++        let binding = self
++            .read_binding()?
++            .ok_or_else(|| anyhow::anyhow!("No current thread handoff"))?;
++        if binding.handoff_id != handoff_id {
++            bail!("Handoff ID is not current in this thread");
++        }
++        let text = self.read_snapshot(&binding)?;
++        if offset > text.len() || !text.is_char_boundary(offset) {
++            bail!("Handoff offset must be a valid UTF-8 byte boundary");
++        }
++        let mut end = offset.saturating_add(PAGE_BYTES).min(text.len());
++        while !text.is_char_boundary(end) {
++            end -= 1;
++        }
++        self.directory.sync()?;
++        if self.read_binding()?.as_ref() != Some(&binding) {
++            bail!("Handoff binding changed during readback");
++        }
++        let mut page = HistoricalPage {
++            handoff_id,
++            historical_data: true,
++            source_message_id: binding.source_message_id,
++            offset,
++            next_offset: (end < text.len()).then_some(end),
++            total_bytes: text.len(),
++            content_sha1: binding.handoff_sha1,
++            text: text[offset..end].to_string(),
++        };
++        while serde_json::to_vec(&page)?.len() > MAX_PAGE_JSON_BYTES {
++            let mut length = page.text.len() / 2;
++            while !page.text.is_char_boundary(length) {
++                length -= 1;
++            }
++            if length == 0 {
++                bail!("Handoff metadata does not fit a bounded output page");
++            }
++            page.text.truncate(length);
++            page.next_offset = Some(offset + length);
++        }
++        Ok(page)
++    }
++
++    fn read_binding(&self) -> anyhow::Result<Option<Binding>> {
++        let text = match self
++            .directory
++            .read_bounded("binding.json", MAX_BINDING_BYTES)
++        {
++            Ok(text) => text,
++            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
++            Err(error) => return Err(error.into()),
++        };
++        let binding: Binding = serde_json::from_str(&text)
++            .map_err(|_| anyhow::anyhow!("Invalid handoff binding record"))?;
++        if binding.schema_version != 1
++            || binding.thread_id != self.thread_id
++            || binding.handoff_id.get_version_num() != 4
++            || binding.source_message_id.is_empty()
++            || binding.source_message_id.len() > MAX_SOURCE_ID_BYTES
++            || !is_digest(&binding.source_text_sha1)
++            || !is_digest(&binding.handoff_sha1)
++        {
++            bail!("Handoff binding does not belong to this thread or schema");
++        }
++        Ok(Some(binding))
++    }
++
++    fn read_snapshot(&self, binding: &Binding) -> anyhow::Result<String> {
++        let text = self
++            .directory
++            .read_bounded(&format!("{}.md", binding.handoff_id), MAX_HANDOFF_BYTES)?;
++        if text.trim().is_empty() || digest(&text) != binding.handoff_sha1 {
++            bail!("Handoff snapshot changed; preserve the original request");
++        }
++        Ok(text)
++    }
++}
++
++fn is_digest(value: &str) -> bool {
++    value.len() == 40
++        && value
++            .bytes()
++            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
++}
++
++#[cfg(test)]
++#[path = "handoff_store_tests.rs"]
++mod tests;
+diff --git a/codex-rs/core/src/handoff_store_tests.rs b/codex-rs/core/src/handoff_store_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..1bf31fd580dea2c3a2f4d9dbd709920e0a140b93
+--- /dev/null
++++ b/codex-rs/core/src/handoff_store_tests.rs
+@@ -0,0 +1,231 @@
++// Copyright 2026 Ubadream
++// SPDX-License-Identifier: Apache-2.0
++
++use super::*;
++use pretty_assertions::assert_eq;
++
++fn fixture() -> anyhow::Result<(tempfile::TempDir, Store)> {
++    let directory = tempfile::tempdir()?;
++    let handle = NoFollowDirectory::open(&directory.path().canonicalize()?)?;
++    let store = Store::new(handle, &Uuid::new_v4().to_string())?;
++    Ok((directory, store))
++}
++
++#[test]
++fn handoff_store_freshness_is_required_for_compaction_but_not_historical_readback()
++-> anyhow::Result<()> {
++    let (_directory, store) = fixture()?;
++    let preparation = store.prepare(
++        "request-one",
++        &digest("request text"),
++        "Synthetic saved handoff.",
++        Continuation::Continue,
++    )?;
++    assert_eq!(preparation.durability, Durability::Confirmed);
++    assert_eq!(
++        store.binding_for_request("request-one", &digest("request text"))?,
++        Some(preparation.binding.clone())
++    );
++    assert_eq!(
++        store.binding_for_request("request-two", &digest("new request"))?,
++        None
++    );
++    let page = store.read_current_page(preparation.binding.handoff_id, 0)?;
++    assert!(page.historical_data);
++    assert_eq!(page.text, "Synthetic saved handoff.");
++    assert_eq!(page.source_message_id, "request-one");
++    Ok(())
++}
++
++#[test]
++fn handoff_store_pages_non_ascii_without_skipping_or_splitting_characters() -> anyhow::Result<()> {
++    let (_directory, store) = fixture()?;
++    let text = format!("{}é😀{}", "a".repeat(PAGE_BYTES - 1), "終".repeat(2000));
++    let prepared = store.prepare("request", &digest("request"), &text, Continuation::Wait)?;
++    let id = prepared.binding.handoff_id;
++    let first = store.read_current_page(id, 0)?;
++    assert_eq!(first.next_offset, Some(PAGE_BYTES - 1));
++    assert!(store.read_current_page(id, PAGE_BYTES).is_err());
++    let mut offset = 0;
++    let mut collected = String::new();
++    loop {
++        let page = store.read_current_page(id, offset)?;
++        assert!(page.text.len() <= PAGE_BYTES);
++        assert_eq!(page.offset, offset);
++        assert_eq!(page.total_bytes, text.len());
++        assert_eq!(page.content_sha1, digest(&text));
++        collected.push_str(&page.text);
++        match page.next_offset {
++            Some(next) => {
++                assert!(next > offset);
++                offset = next;
++            }
++            None => break,
++        }
++    }
++    assert_eq!(collected, text);
++    assert!(store.read_current_page(id, text.len() + 1).is_err());
++    let end = store.read_current_page(id, text.len())?;
++    assert_eq!((end.text, end.next_offset), (String::new(), None));
++    Ok(())
++}
++
++#[test]
++fn handoff_store_current_id_supersedes_old_ids_without_removing_snapshots() -> anyhow::Result<()> {
++    let (directory, store) = fixture()?;
++    let old = store.prepare(
++        "request",
++        &digest("request"),
++        "Old synthetic handoff.",
++        Continuation::Wait,
++    )?;
++    let current = store.prepare(
++        "request",
++        &digest("request"),
++        "New synthetic handoff.",
++        Continuation::Wait,
++    )?;
++    assert!(store.read_current_page(old.binding.handoff_id, 0).is_err());
++    assert!(store.read_current_page(Uuid::new_v4(), 0).is_err());
++    assert_eq!(
++        store.read_current_page(current.binding.handoff_id, 0)?.text,
++        "New synthetic handoff."
++    );
++    assert!(
++        directory
++            .path()
++            .join(format!("{}.md", old.binding.handoff_id))
++            .exists()
++    );
++    Ok(())
++}
++
++#[test]
++fn handoff_store_rejects_another_threads_id_even_if_records_are_copied() -> anyhow::Result<()> {
++    let (first_directory, first) = fixture()?;
++    let (second_directory, second) = fixture()?;
++    let first_prepared = first.prepare(
++        "request",
++        &digest("request"),
++        "Thread one synthetic handoff.",
++        Continuation::Wait,
++    )?;
++    let second_prepared = second.prepare(
++        "request",
++        &digest("request"),
++        "Thread two synthetic handoff.",
++        Continuation::Wait,
++    )?;
++    assert!(
++        second
++            .read_current_page(first_prepared.binding.handoff_id, 0)
++            .is_err()
++    );
++    assert!(
++        first
++            .read_current_page(second_prepared.binding.handoff_id, 0)
++            .is_err()
++    );
++    std::fs::copy(
++        first_directory.path().join("binding.json"),
++        second_directory.path().join("binding.json"),
++    )?;
++    let snapshot = format!("{}.md", first_prepared.binding.handoff_id);
++    std::fs::copy(
++        first_directory.path().join(&snapshot),
++        second_directory.path().join(&snapshot),
++    )?;
++    assert!(
++        second
++            .read_current_page(first_prepared.binding.handoff_id, 0)
++            .is_err()
++    );
++    assert!(
++        second
++            .binding_for_request("request", &digest("request"))
++            .is_err()
++    );
++    Ok(())
++}
++
++#[test]
++fn handoff_store_rejects_modified_snapshot_and_preserves_newer_request() -> anyhow::Result<()> {
++    let (directory, store) = fixture()?;
++    let prepared = store.prepare(
++        "request",
++        &digest("request"),
++        "Original synthetic handoff.",
++        Continuation::Wait,
++    )?;
++    std::fs::write(
++        directory
++            .path()
++            .join(format!("{}.md", prepared.binding.handoff_id)),
++        "Changed synthetic handoff.",
++    )?;
++    assert!(
++        store
++            .read_current_page(prepared.binding.handoff_id, 0)
++            .is_err()
++    );
++    assert!(
++        store
++            .binding_for_request("request", &digest("request"))
++            .is_err()
++    );
++    assert_eq!(
++        store.binding_for_request("newer-request", &digest("newer"))?,
++        None
++    );
++    Ok(())
++}
++
++#[test]
++fn handoff_store_rejects_invalid_text_before_creating_any_record() -> anyhow::Result<()> {
++    let (directory, store) = fixture()?;
++    for text in [
++        String::new(),
++        " \n ".to_string(),
++        "x".repeat(MAX_HANDOFF_BYTES as usize + 1),
++    ] {
++        assert!(
++            store
++                .prepare("request", &digest("request"), &text, Continuation::Wait)
++                .is_err()
++        );
++    }
++    assert_eq!(std::fs::read_dir(directory.path())?.count(), 0);
++    Ok(())
++}
++
++#[test]
++fn handoff_store_bounds_serialized_pages_even_when_json_escaping_expands_text() -> anyhow::Result<()>
++{
++    let (_directory, store) = fixture()?;
++    let text = format!("x{}", "\0".repeat(12_000));
++    let source_id = "\0".repeat(MAX_SOURCE_ID_BYTES);
++    let prepared = store.prepare(
++        &source_id,
++        &digest("synthetic request"),
++        &text,
++        Continuation::Wait,
++    )?;
++    let mut offset = 0;
++    let mut collected = String::new();
++    loop {
++        let page = store.read_current_page(prepared.binding.handoff_id, offset)?;
++        assert!(serde_json::to_vec(&page)?.len() <= MAX_PAGE_JSON_BYTES);
++        assert!(serialize_read_result(&page)?.len() <= MAX_TOOL_RESULT_BYTES);
++        assert!(page.text.len() <= PAGE_BYTES);
++        collected.push_str(&page.text);
++        match page.next_offset {
++            Some(next) => {
++                assert!(next > offset);
++                offset = next;
++            }
++            None => break,
++        }
++    }
++    assert_eq!(collected, text);
++    Ok(())
++}
+diff --git a/codex-rs/core/src/handoff_stream.rs b/codex-rs/core/src/handoff_stream.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..5bcf2367e94c3c2521513c67a146da42cdbb968f
+--- /dev/null
++++ b/codex-rs/core/src/handoff_stream.rs
+@@ -0,0 +1,43 @@
++// Copyright 2026 Ubadream
++// SPDX-License-Identifier: Apache-2.0
++
++//! Bounded collection of an already policy-checked handoff source stream.
++
++use codex_exec_server::FileSystemReadStream;
++use futures::StreamExt;
++use std::io;
++use tokio_util::sync::CancellationToken;
++
++pub(crate) async fn read(
++    mut stream: FileSystemReadStream,
++    cancellation: &CancellationToken,
++) -> io::Result<String> {
++    let mut bytes = Vec::new();
++    loop {
++        let chunk = tokio::select! {
++            biased;
++            _ = cancellation.cancelled() => {
++                return Err(io::Error::new(io::ErrorKind::Interrupted, "handoff read cancelled"));
++            }
++            chunk = stream.next() => chunk,
++        };
++        let Some(chunk) = chunk else {
++            break;
++        };
++        let chunk = chunk?;
++        if chunk.len()
++            > (crate::handoff_binding::MAX_HANDOFF_BYTES as usize).saturating_sub(bytes.len())
++        {
++            return Err(io::Error::new(
++                io::ErrorKind::InvalidData,
++                "handoff exceeds 32 KiB",
++            ));
++        }
++        bytes.extend_from_slice(&chunk);
++    }
++    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
++}
++
++#[cfg(test)]
++#[path = "handoff_stream_tests.rs"]
++mod tests;
+diff --git a/codex-rs/core/src/handoff_stream_tests.rs b/codex-rs/core/src/handoff_stream_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..e2b5c38e3097239bc37dfbc519f9d36ff9d64f62
+--- /dev/null
++++ b/codex-rs/core/src/handoff_stream_tests.rs
+@@ -0,0 +1,75 @@
++// Copyright 2026 Ubadream
++// SPDX-License-Identifier: Apache-2.0
++
++use super::read;
++use codex_exec_server::FileSystemReadStream;
++use futures::stream;
++use pretty_assertions::assert_eq;
++use std::io;
++use std::time::Duration;
++use tokio_util::sync::CancellationToken;
++
++#[tokio::test]
++async fn handoff_stream_accepts_utf8_split_across_chunks() -> io::Result<()> {
++    let input = FileSystemReadStream::new(stream::iter(vec![
++        Ok(vec![b'c', b'a', b'f', 0xc3].into()),
++        Ok(vec![0xa9].into()),
++    ]));
++    assert_eq!(read(input, &CancellationToken::new()).await?, "café");
++    Ok(())
++}
++
++#[tokio::test]
++async fn handoff_stream_rejects_growth_beyond_the_original_metadata_bound() {
++    let input = FileSystemReadStream::new(stream::iter(vec![
++        Ok(vec![b'x'; crate::handoff_binding::MAX_HANDOFF_BYTES as usize].into()),
++        Ok(vec![b'y'].into()),
++    ]));
++    let error = read(input, &CancellationToken::new())
++        .await
++        .expect_err("bounded stream");
++    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
++}
++
++#[tokio::test]
++async fn handoff_stream_cancellation_interrupts_an_idle_source() {
++    let cancellation = CancellationToken::new();
++    let reader_cancellation = cancellation.clone();
++    let reader = tokio::spawn(async move {
++        read(
++            FileSystemReadStream::new(stream::pending()),
++            &reader_cancellation,
++        )
++        .await
++    });
++    cancellation.cancel();
++    let error = tokio::time::timeout(Duration::from_secs(1), reader)
++        .await
++        .expect("cancellation must not wait for another stream item")
++        .expect("reader task")
++        .expect_err("cancelled stream");
++    assert_eq!(error.kind(), io::ErrorKind::Interrupted);
++}
++
++#[tokio::test]
++async fn handoff_stream_propagates_io_and_utf8_errors() {
++    let denied = FileSystemReadStream::new(stream::iter(vec![Err(io::Error::new(
++        io::ErrorKind::PermissionDenied,
++        "synthetic policy denial",
++    ))]));
++    assert_eq!(
++        read(denied, &CancellationToken::new())
++            .await
++            .unwrap_err()
++            .kind(),
++        io::ErrorKind::PermissionDenied
++    );
++    let invalid = FileSystemReadStream::new(stream::iter(vec![Ok(vec![0xff].into())]));
++    assert_eq!(
++        read(invalid, &CancellationToken::new())
++            .await
++            .unwrap_err()
++            .kind(),
++        io::ErrorKind::InvalidData
++    );
++}
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index a580f36fca8f2c786ce642d2bedbb5a70510cc6d..2dd8f8402f0ba714b22de96391c6dd1b03766a1d 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -35,9 +35,11 @@ mod compact_model_fallback;
+ mod compact_remote_history;
+ mod compact_remote_v2;
+ mod compact_token_budget;
+-mod thread_startup_metadata;
+-mod handoff_compact;
+ mod handoff_binding;
++mod handoff_compact;
++mod handoff_store;
++mod handoff_stream;
++mod thread_startup_metadata;
+ pub use codex_network_proxy::EnvironmentNetworkPolicy;
+ pub use codex_network_proxy::NetworkDomainPermission;
+ pub use codex_network_proxy::NetworkDomainPermissionEntry;
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index e85eaed4281796649f054fee131b2c0371f2e12f..72f4b20cbf8718bb65fc9559aa1af46521ddadc5 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -719,7 +719,8 @@ pub(crate) async fn run_turn(
+                             let result: CodexResult<()> = async {
+                                 if mode == crate::handoff_compact::Mode::C {
+                                     let path =
+-                                        crate::handoff_compact::archive(&sess, &turn_context).await?;
++                                        crate::handoff_compact::archive(&sess, &turn_context)
++                                            .await?;
+                                     let turn_state = {
+                                         let active = sess.active_turn.lock().await;
+                                         Arc::clone(
+diff --git a/codex-rs/core/src/tools/handlers/handoff_compact.rs b/codex-rs/core/src/tools/handlers/handoff_compact.rs
+index 6f36aa64cdf71103dbd8645d9806f3af280bccd8..b4beb655829d87efea6671fe42b988c1d066627a 100644
+--- a/codex-rs/core/src/tools/handlers/handoff_compact.rs
++++ b/codex-rs/core/src/tools/handlers/handoff_compact.rs
+@@ -1,11 +1,6 @@
+ // Copyright 2026 Ubadream
+ // SPDX-License-Identifier: Apache-2.0
+ 
+-use codex_exec_server::GetMetadataOptions;
+-use codex_tools::JsonSchema;
+-use codex_tools::ResponsesApiTool;
+-use codex_tools::ToolName;
+-use codex_tools::ToolSpec;
+ use crate::function_tool::FunctionCallError;
+ use crate::handoff_compact::Mode;
+ use crate::tools::context::FunctionToolOutput;
+@@ -14,7 +9,11 @@ use crate::tools::context::ToolPayload;
+ use crate::tools::context::boxed_tool_output;
+ use crate::tools::registry::CoreToolRuntime;
+ use crate::tools::registry::ToolExecutor;
+-use futures::StreamExt;
++use codex_exec_server::GetMetadataOptions;
++use codex_tools::JsonSchema;
++use codex_tools::ResponsesApiTool;
++use codex_tools::ToolName;
++use codex_tools::ToolSpec;
+ use serde::Deserialize;
+ use serde_json::json;
+ use std::collections::BTreeMap;
+@@ -29,6 +28,8 @@ struct Arguments {
+     handoff_path: Option<String>,
+     environment_id: Option<String>,
+     continuation: Option<crate::handoff_binding::Continuation>,
++    handoff_id: Option<uuid::Uuid>,
++    offset: Option<usize>,
+ }
+ 
+ impl ToolExecutor<ToolInvocation> for HandoffCompactHandler {
+@@ -39,15 +40,17 @@ impl ToolExecutor<ToolInvocation> for HandoffCompactHandler {
+     fn spec(&self) -> ToolSpec {
+         ToolSpec::Function(ResponsesApiTool {
+             name: "handoff_compact".to_string(),
+-            description: "Prepared handoffs, request binding, and automatic handoff continuation are disabled in this build; do not call prepare. A schedules native summarization after the final response. C also saves a local plaintext archive of visible dialogue text since the previous checkpoint. cancel cancels this turn's scheduled compaction. New input or cancellation cancels the schedule. Existing hooks still apply. A/C scheduling receipts are not completion; completion is reported by the contextCompaction event.".to_string(),
++            description: "Prepared handoffs, handoff readback, request binding, and automatic handoff continuation are disabled pending native integration validation; do not call prepare or read in this build. The planned read mode returns at most 4096 raw UTF-8 bytes of explicitly historical data per page, with an 8192-byte cap on the complete serialized tool result; JSON escaping can make pages smaller. It accepts an opaque handoff ID in the current thread, never a storage path. A schedules native summarization after the final response. C also saves a local plaintext archive of visible dialogue text since the previous checkpoint. cancel cancels this turn's schedule. New input or cancellation cancels the schedule. Existing hooks still apply. A/C scheduling receipts are not completion; completion is reported by the contextCompaction event.".to_string(),
+             strict: false,
+             defer_loading: None,
+             parameters: JsonSchema::object(BTreeMap::from([
+-                ("mode".to_string(), JsonSchema::string_enum(vec![json!("prepare"), json!("A"), json!("C"), json!("cancel")], None)),
++                ("mode".to_string(), JsonSchema::string_enum(vec![json!("prepare"), json!("read"), json!("A"), json!("C"), json!("cancel")], None)),
+                 ("reason".to_string(), JsonSchema::string(Some("Brief reason (1..500 characters).".to_string()))),
+                 ("handoff_path".to_string(), JsonSchema::string(Some("For prepare: a read-back UTF-8 handoff, at most 32 KiB. Absolute or relative to the selected environment's working directory.".to_string()))),
+                 ("environment_id".to_string(), JsonSchema::string(Some("For prepare: selected execution environment; omitted uses the primary environment. Existing filesystem permissions are enforced without escalation.".to_string()))),
+                 ("continuation".to_string(), JsonSchema::string_enum(vec![json!("continue"), json!("wait")], Some("For prepare: continue only unfinished authorized work; wait if complete or awaiting a decision.".to_string()))),
++                ("handoff_id".to_string(), JsonSchema::string(Some("For read: the opaque UUID returned for this thread's current handoff. Paths and other thread IDs are not accepted.".to_string()))),
++                ("offset".to_string(), JsonSchema::integer(Some("For read: a nonnegative UTF-8 byte offset, initially 0. Continue with next_offset from the previous page; pages are at most 4096 bytes.".to_string()))),
+             ]), Some(vec!["mode".to_string(), "reason".to_string()]), Some(false.into())),
+             output_schema: None,
+         })
+@@ -86,11 +89,42 @@ impl ToolExecutor<ToolInvocation> for HandoffCompactHandler {
+                 }
+                 std::sync::Arc::clone(&active.turn_state)
+             };
++            if args.mode == Mode::Read {
++                if args.handoff_path.is_some()
++                    || args.environment_id.is_some()
++                    || args.continuation.is_some()
++                {
++                    return Err(FunctionCallError::RespondToModel(
++                        "read accepts only handoff_id and offset".to_string(),
++                    ));
++                }
++                let handoff_id = args.handoff_id.ok_or_else(|| {
++                    FunctionCallError::RespondToModel("read requires handoff_id".to_string())
++                })?;
++                let page = crate::handoff_binding::read_current_page(
++                    &invocation.session,
++                    &invocation.turn,
++                    handoff_id,
++                    args.offset.unwrap_or_default(),
++                )
++                .await
++                .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
++                let output = crate::handoff_store::serialize_read_result(&page)
++                    .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
++                return Ok(boxed_tool_output(FunctionToolOutput::from_text(
++                    output,
++                    Some(true),
++                )));
++            }
++            if args.handoff_id.is_some() || args.offset.is_some() {
++                return Err(FunctionCallError::RespondToModel(
++                    "handoff_id and offset are only valid for read".to_string(),
++                ));
++            }
+             if args.mode == Mode::Prepare {
+                 // Fail before reading the selected source or touching runtime storage.
+-                crate::handoff_binding::ensure_storage_available().map_err(|error| {
+-                    FunctionCallError::RespondToModel(error.to_string())
+-                })?;
++                crate::handoff_binding::ensure_storage_available()
++                    .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
+                 let path = args.handoff_path.ok_or_else(|| {
+                     FunctionCallError::RespondToModel("prepare requires handoff_path".to_string())
+                 })?;
+@@ -129,7 +163,7 @@ impl ToolExecutor<ToolInvocation> for HandoffCompactHandler {
+                 }
+                 // Streaming keeps the accumulated text bounded even if the source grows
+                 // after metadata inspection. The executor bounds each delivered chunk.
+-                let mut stream = fs
++                let stream = fs
+                     .read_file_stream(&path_uri, Some(&sandbox))
+                     .await
+                     .map_err(|error| {
+@@ -137,43 +171,53 @@ impl ToolExecutor<ToolInvocation> for HandoffCompactHandler {
+                             "unable to read handoff through filesystem policy: {error}"
+                         ))
+                     })?;
+-                let mut bytes = Vec::new();
+-                while let Some(chunk) = stream.next().await {
+-                    if invocation.cancellation_token.is_cancelled() {
+-                        return Err(FunctionCallError::RespondToModel(
+-                            "handoff read cancelled".to_string(),
+-                        ));
+-                    }
+-                    let chunk = chunk.map_err(|error| {
++                let text = crate::handoff_stream::read(stream, &invocation.cancellation_token)
++                    .await
++                    .map_err(|error| {
+                         FunctionCallError::RespondToModel(format!(
+-                            "unable to stream handoff through filesystem policy: {error}"
++                            "unable to collect handoff through filesystem policy: {error}"
+                         ))
+                     })?;
+-                    if chunk.len() > (crate::handoff_binding::MAX_HANDOFF_BYTES as usize)
+-                        .saturating_sub(bytes.len())
+-                    {
+-                        return Err(FunctionCallError::RespondToModel(
+-                            "handoff exceeds 32 KiB".to_string(),
+-                        ));
+-                    }
+-                    bytes.extend_from_slice(&chunk);
++                if !crate::handoff_binding::requesting_turn_is_active(
++                    &invocation.session,
++                    &invocation.turn,
++                    &invocation.cancellation_token,
++                )
++                .await
++                {
++                    return Err(FunctionCallError::RespondToModel(
++                        "Requesting turn became inactive during source read; no handoff was written".to_string(),
++                    ));
+                 }
+-                let text = String::from_utf8(bytes).map_err(|error| {
+-                    FunctionCallError::RespondToModel(format!(
+-                        "handoff is not valid UTF-8: {error}"
+-                    ))
+-                })?;
+-                let binding = crate::handoff_binding::prepare(
++                let preparation = crate::handoff_binding::prepare(
+                     &invocation.session,
+                     &invocation.turn,
+                     &text,
+                     continuation,
++                    &invocation.cancellation_token,
+                 )
+                 .await
+-                .map_err(|e| FunctionCallError::RespondToModel(format!("Handoff was not bound: {e}")))?;
++                .map_err(|e| {
++                    FunctionCallError::RespondToModel(format!("Handoff was not bound: {e}"))
++                })?;
++                let confirmed =
++                    preparation.durability == crate::handoff_store::Durability::Confirmed;
++                let ready = confirmed
++                    && preparation.requesting_turn_active
++                    && preparation.covers_current_request;
+                 return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+-                    json!({"prepared": binding, "compaction_started": false}).to_string(),
+-                    Some(true),
++                    json!({
++                        "prepared": preparation.binding,
++                        "snapshot_saved": true,
++                        "durability": preparation.durability,
++                        "requesting_turn_active": preparation.requesting_turn_active,
++                        "covers_current_request": preparation.covers_current_request,
++                        "compaction_ready": ready,
++                        "compaction_started": false,
++                        "reconcile_required": !confirmed,
++                        "reconciliation": "If durability is unconfirmed, the new binding is already visible. Read the returned handoff ID to reconcile; do not repeat prepare blindly. If the requesting turn is inactive or the request changed, keep the saved handoff as historical data and do not schedule compaction from this receipt.",
++                    }).to_string(),
++                    Some(ready),
+                 )));
+             }
+             if args.handoff_path.is_some()
+@@ -181,7 +225,8 @@ impl ToolExecutor<ToolInvocation> for HandoffCompactHandler {
+                 || args.environment_id.is_some()
+             {
+                 return Err(FunctionCallError::RespondToModel(
+-                    "handoff_path, environment_id and continuation are only valid for prepare".to_string(),
++                    "handoff_path, environment_id and continuation are only valid for prepare"
++                        .to_string(),
+                 ));
+             }
+             let mut state = turn_state.lock().await;
+diff --git a/codex-rs/core/src/tools/handlers/mod.rs b/codex-rs/core/src/tools/handlers/mod.rs
+index 27da0c54f6cbcff1a9efeec1b84c3a380d124f79..7d51c1369908eb9d884445bd89bb03cda65f61bf 100644
+--- a/codex-rs/core/src/tools/handlers/mod.rs
++++ b/codex-rs/core/src/tools/handlers/mod.rs
+@@ -5,6 +5,7 @@ mod dynamic;
+ pub(crate) mod extension_tools;
+ mod get_context_remaining;
+ pub(crate) mod get_context_remaining_spec;
++mod handoff_compact;
+ mod list_available_plugins_to_install;
+ pub(crate) mod list_available_plugins_to_install_spec;
+ mod mcp;
+@@ -35,7 +36,6 @@ pub(crate) mod unified_exec;
+ mod view_image;
+ pub(crate) mod view_image_spec;
+ mod wait_for_environment;
+-mod handoff_compact;
+ 
+ use codex_file_system::FileSystemSandboxContext;
+ use codex_sandboxing::policy_transforms::materialize_additional_permissions_with_context;
+@@ -61,6 +61,7 @@ use codex_protocol::protocol::AskForApproval;
+ pub use current_time::CurrentTimeHandler;
+ pub use dynamic::DynamicToolHandler;
+ pub use get_context_remaining::GetContextRemainingHandler;
++pub use handoff_compact::HandoffCompactHandler;
+ pub use list_available_plugins_to_install::ListAvailablePluginsToInstallHandler;
+ pub use mcp::McpHandler;
+ pub use mcp_resource::ListMcpResourceTemplatesHandler;
+@@ -83,7 +84,6 @@ pub use unified_exec::WriteStdinHandler;
+ pub use view_image::ViewImageHandler;
+ pub(crate) use wait_for_environment::WaitForEnvironmentHandler;
+ pub use wait_for_environment::WaitForEnvironmentToolConfig;
+-pub use handoff_compact::HandoffCompactHandler;
+ 
+ pub(crate) fn parse_arguments<T>(arguments: &str) -> Result<T, FunctionCallError>
+ where
+diff --git a/codex-rs/core/tests/suite/handoff_compact.rs b/codex-rs/core/tests/suite/handoff_compact.rs
+index df33da33feaa26fd7d12c4c8bbbb2feaea4ddc41..70d355847f1497aa0f84c69fe86ccd61a95f1f23 100644
+--- a/codex-rs/core/tests/suite/handoff_compact.rs
++++ b/codex-rs/core/tests/suite/handoff_compact.rs
+@@ -47,7 +47,10 @@ fn prepare(path: &std::path::Path, continuation: &str) -> String {
+ async fn handoff_compact_native_midturn_uses_prepared_handoff() -> Result<()> {
+     let dir = tempfile::tempdir()?;
+     let path = dir.path().join("HANDOFF.md");
+-    std::fs::write(&path, "Synthetic task: fix wiring. Changes saved; build next.")?;
++    std::fs::write(
++        &path,
++        "Synthetic task: fix wiring. Changes saved; build next.",
++    )?;
+     let server = responses::start_mock_server().await;
+     let high =
+         sse(vec![
+@@ -108,7 +111,12 @@ async fn handoff_compact_damaged_snapshot_does_not_replace_history() -> Result<(
+         .unwrap()?;
+     let binding: serde_json::Value =
+         serde_json::from_str(&std::fs::read_to_string(entry.path().join("binding.json"))?)?;
+-    std::fs::write(binding["handoff_path"].as_str().unwrap(), "modified")?;
++    std::fs::write(
++        entry
++            .path()
++            .join(format!("{}.md", binding["handoff_id"].as_str().unwrap())),
++        "modified",
++    )?;
+     test.codex
+         .submit(codex_protocol::protocol::Op::Compact)
+         .await?;
+@@ -136,7 +144,10 @@ async fn handoff_compact_bound_handoff_replaces_request_and_continues_once() ->
+     for mode in ["A", "C"] {
+         let dir = tempfile::tempdir()?;
+         let path = dir.path().join("HANDOFF.md");
+-        std::fs::write(&path, "Synthetic request: fix wiring. Completed: saved. Next: build.")?;
++        std::fs::write(
++            &path,
++            "Synthetic request: fix wiring. Completed: saved. Next: build.",
++        )?;
+         let server = responses::start_mock_server().await;
+         let mock = responses::mount_sse_sequence(
+             &server,
+@@ -162,7 +173,9 @@ async fn handoff_compact_bound_handoff_replaces_request_and_continues_once() ->
+         );
+         assert!(!requests[4].body_contains_text("OLD_REQUEST_DO_NOT_REPLAY_240K"));
+         assert!(requests[4].body_contains_text("BOUND_SUMMARY"));
+-        assert!(requests[4].body_contains_text("Read the handoff and continue only unfinished work already authorized by the user"));
++        assert!(requests[4].body_contains_text(
++            "Read the handoff and continue only unfinished work already authorized by the user"
++        ));
+         let rollout = std::fs::read_to_string(test.codex.rollout_path().unwrap())?;
+         let checkpoint = rollout
+             .lines()
+@@ -184,10 +197,15 @@ async fn handoff_compact_bound_handoff_replaces_request_and_continues_once() ->
+             bindings[0].path().join("binding.json"),
+         )?)?;
+         assert_eq!(
+-            std::fs::read_to_string(binding["handoff_path"].as_str().unwrap())?,
++            std::fs::read_to_string(
++                bindings[0]
++                    .path()
++                    .join(format!("{}.md", binding["handoff_id"].as_str().unwrap()))
++            )?,
+             std::fs::read_to_string(&path)?
+         );
+-        assert!(requests[4].body_contains_text(binding["handoff_path"].as_str().unwrap()));
++        assert!(requests[4].body_contains_text(binding["handoff_id"].as_str().unwrap()));
++        assert!(binding.get("handoff_path").is_none());
+     }
+     Ok(())
+ }
+@@ -280,9 +298,11 @@ async fn handoff_compact_c_waits_for_final_and_archives_it() -> Result<()> {
+         })
+         .build_with_auto_env(&server)
+         .await?;
+-    test.submit_turn("Preserve source\n\nContinue this segment").await?;
+-    let files: Vec<_> = std::fs::read_dir(test.codex_home_path().join("handoff-compact/originals"))?
+-        .collect::<std::io::Result<_>>()?;
++    test.submit_turn("Preserve source\n\nContinue this segment")
++        .await?;
++    let files: Vec<_> =
++        std::fs::read_dir(test.codex_home_path().join("handoff-compact/originals"))?
++            .collect::<std::io::Result<_>>()?;
+     assert_eq!(files.len(), 1);
+     let archive = std::fs::read_to_string(files[0].path())?;
+     assert!(archive.contains("Final sentence  preserve whitespace"));
+diff --git a/codex-rs/core/tests/suite/handoff_compact_security.rs b/codex-rs/core/tests/suite/handoff_compact_security.rs
+index ddbc8e2f6f9275755df9e68e97379f8dd84c5d4c..c4473ae884a1073b81add90a430a124755ca73c8 100644
+--- a/codex-rs/core/tests/suite/handoff_compact_security.rs
++++ b/codex-rs/core/tests/suite/handoff_compact_security.rs
+@@ -39,22 +39,96 @@ fn final_response() -> String {
+     ])
+ }
+ 
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn handoff_read_fails_closed_without_resolving_an_opaque_id() -> Result<()> {
++    let server = responses::start_mock_server().await;
++    let test = test_codex().build(&server).await?;
++    let mock = responses::mount_sse_sequence(
++        &server,
++        vec![
++            sse(vec![
++                ev_function_call(
++                    "read",
++                    "handoff_compact",
++                    &json!({
++                        "mode":"read", "reason":"test unavailable store",
++                        "handoff_id":uuid::Uuid::new_v4(), "offset":0,
++                    })
++                    .to_string(),
++                ),
++                ev_completed("read"),
++            ]),
++            final_response(),
++        ],
++    )
++    .await;
++    test.submit_turn("Read the synthetic handoff.").await?;
++    let request = mock.last_request().context("tool result request")?;
++    let output = request
++        .function_call_output_text("read")
++        .context("tool error")?;
++    assert!(output.contains("disabled pending atomic no-follow"));
++    assert!(!output.contains("handoff_page"));
++    assert!(!test.codex_home_path().join("handoff-compact").exists());
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn handoff_read_rejects_path_shaped_ids_before_storage_access() -> Result<()> {
++    let server = responses::start_mock_server().await;
++    let test = test_codex().build(&server).await?;
++    let mock = responses::mount_sse_sequence(
++        &server,
++        vec![
++            sse(vec![
++                ev_function_call(
++                    "read",
++                    "handoff_compact",
++                    &json!({
++                        "mode":"read", "reason":"test ID validation",
++                        "handoff_id":"../synthetic-handoff.md", "offset":0,
++                    })
++                    .to_string(),
++                ),
++                ev_completed("read"),
++            ]),
++            final_response(),
++        ],
++    )
++    .await;
++    test.submit_turn("Read the synthetic handoff.").await?;
++    let request = mock.last_request().context("tool result request")?;
++    let output = request
++        .function_call_output_text("read")
++        .context("tool error")?;
++    assert!(!output.contains("handoff_page"));
++    assert!(!output.contains("disabled pending atomic no-follow"));
++    assert!(!test.codex_home_path().join("handoff-compact").exists());
++    Ok(())
++}
++
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+ async fn handoff_prepare_fails_closed_before_source_lookup_or_store_write() -> Result<()> {
+     let server = responses::start_mock_server().await;
+     let test = test_codex().build(&server).await?;
+-    let mock = responses::mount_sse_sequence(&server, vec![
+-        prepare_call(json!({
+-            "mode":"prepare", "reason":"test unavailable store",
+-            "handoff_path":"missing-synthetic-handoff.md",
+-            "environment_id":"missing-synthetic-environment",
+-            "continuation":"wait",
+-        })),
+-        final_response(),
+-    ]).await;
++    let mock = responses::mount_sse_sequence(
++        &server,
++        vec![
++            prepare_call(json!({
++                "mode":"prepare", "reason":"test unavailable store",
++                "handoff_path":"missing-synthetic-handoff.md",
++                "environment_id":"missing-synthetic-environment",
++                "continuation":"wait",
++            })),
++            final_response(),
++        ],
++    )
++    .await;
+     test.submit_turn("Prepare the synthetic handoff.").await?;
+     let request = mock.last_request().context("tool result request")?;
+-    let output = request.function_call_output_text("prepare").context("tool error")?;
++    let output = request
++        .function_call_output_text("prepare")
++        .context("tool error")?;
+     assert!(output.contains("disabled pending atomic no-follow"));
+     assert!(!output.contains("\"prepared\""));
+     assert!(!test.codex_home_path().join("handoff-compact").exists());
+@@ -67,20 +141,34 @@ async fn handoff_prepare_rejects_unknown_environment_without_host_fallback() ->
+     let server = responses::start_mock_server().await;
+     let test = test_codex().build(&server).await?;
+     let source = test.config.cwd.join("handoff.md");
+-    std::fs::write(&source, "Synthetic source must not be read via host fallback.")?;
+-    let mock = responses::mount_sse_sequence(&server, vec![
+-        prepare_call(json!({
+-            "mode":"prepare", "reason":"test environment boundary",
+-            "handoff_path":source, "environment_id":"missing-synthetic-environment",
+-            "continuation":"wait",
+-        })),
+-        final_response(),
+-    ]).await;
++    std::fs::write(
++        &source,
++        "Synthetic source must not be read via host fallback.",
++    )?;
++    let mock = responses::mount_sse_sequence(
++        &server,
++        vec![
++            prepare_call(json!({
++                "mode":"prepare", "reason":"test environment boundary",
++                "handoff_path":source, "environment_id":"missing-synthetic-environment",
++                "continuation":"wait",
++            })),
++            final_response(),
++        ],
++    )
++    .await;
+     test.submit_turn("Prepare the synthetic handoff.").await?;
+     let request = mock.last_request().context("tool result request")?;
+-    let output = request.function_call_output_text("prepare").context("tool error")?;
++    let output = request
++        .function_call_output_text("prepare")
++        .context("tool error")?;
+     assert!(output.contains("unknown turn environment id"));
+-    assert!(!test.codex_home_path().join("handoff-compact/handoffs").exists());
++    assert!(
++        !test
++            .codex_home_path()
++            .join("handoff-compact/handoffs")
++            .exists()
++    );
+     Ok(())
+ }
+ 
+@@ -94,28 +182,41 @@ async fn handoff_prepare_enforces_denied_synthetic_outside_file() -> Result<()>
+     let source = outside.path().join("synthetic-denied-handoff.md");
+     let content = "SYNTHETIC_DENIED_TEXT_MUST_NOT_BE_COPIED";
+     std::fs::write(&source, content)?;
+-    let mock = responses::mount_sse_sequence(&server, vec![
+-        prepare_call(json!({
+-            "mode":"prepare", "reason":"test read denial",
+-            "handoff_path":source, "continuation":"wait",
+-        })),
+-        final_response(),
+-    ]).await;
++    let mock = responses::mount_sse_sequence(
++        &server,
++        vec![
++            prepare_call(json!({
++                "mode":"prepare", "reason":"test read denial",
++                "handoff_path":source, "continuation":"wait",
++            })),
++            final_response(),
++        ],
++    )
++    .await;
+     let mut policy = FileSystemSandboxPolicy::default();
+     policy.entries.push(FileSystemSandboxEntry {
+-        path: FileSystemPath::Path { path: source.abs().into() },
++        path: FileSystemPath::Path {
++            path: source.abs().into(),
++        },
+         access: FileSystemAccessMode::Deny,
+         missing_path_behavior: None,
+     });
+-    let permissions = PermissionProfile::from_runtime_permissions(
+-        &policy, NetworkSandboxPolicy::Restricted,
+-    );
+-    test.submit_turn_with_permission_profile("Prepare the synthetic handoff.", permissions).await?;
++    let permissions =
++        PermissionProfile::from_runtime_permissions(&policy, NetworkSandboxPolicy::Restricted);
++    test.submit_turn_with_permission_profile("Prepare the synthetic handoff.", permissions)
++        .await?;
+     let request = mock.last_request().context("tool result request")?;
+-    let output = request.function_call_output_text("prepare").context("tool error")?;
++    let output = request
++        .function_call_output_text("prepare")
++        .context("tool error")?;
+     assert!(output.contains("through filesystem policy"));
+     assert!(!output.contains(content));
+-    assert!(!test.codex_home_path().join("handoff-compact/handoffs").exists());
++    assert!(
++        !test
++            .codex_home_path()
++            .join("handoff-compact/handoffs")
++            .exists()
++    );
+     Ok(())
+ }
+ 
+@@ -126,21 +227,63 @@ async fn handoff_prepare_resolves_relative_path_in_explicit_local_environment()
+     let test = test_codex().build(&server).await?;
+     let content = "Synthetic UTF-8 handoff: café. Next: verify the result.";
+     std::fs::write(test.config.cwd.join("handoff.md"), content)?;
+-    let mock = responses::mount_sse_sequence(&server, vec![
+-        prepare_call(json!({
+-            "mode":"prepare", "reason":"test environment-relative path",
+-            "handoff_path":"handoff.md", "environment_id":LOCAL_ENVIRONMENT_ID,
+-            "continuation":"wait",
+-        })),
+-        final_response(),
+-    ]).await;
+-    test.submit_turn_with_environments("Prepare the synthetic handoff.",
+-        Some(vec![local(test.config.cwd.clone())])).await?;
++    let mock = responses::mount_sse_sequence(
++        &server,
++        vec![
++            prepare_call(json!({
++                "mode":"prepare", "reason":"test environment-relative path",
++                "handoff_path":"handoff.md", "environment_id":LOCAL_ENVIRONMENT_ID,
++                "continuation":"wait",
++            })),
++            final_response(),
++        ],
++    )
++    .await;
++    test.submit_turn_with_environments(
++        "Prepare the synthetic handoff.",
++        Some(vec![local(test.config.cwd.clone())]),
++    )
++    .await?;
+     let request = mock.last_request().context("tool result request")?;
+-    let output = request.function_call_output_text("prepare").context("tool result")?;
++    let output = request
++        .function_call_output_text("prepare")
++        .context("tool result")?;
+     let result: serde_json::Value = serde_json::from_str(&output)?;
+-    let path = result["prepared"]["handoff_path"].as_str().context("snapshot path")?;
+-    assert_eq!(std::fs::read_to_string(path)?, content);
++    let handoff_id = result["prepared"]["handoff_id"]
++        .as_str()
++        .context("opaque snapshot ID")?;
++    assert!(result["prepared"].get("handoff_path").is_none());
++    let read_mock = responses::mount_sse_sequence(
++        &server,
++        vec![
++            sse(vec![
++                ev_function_call(
++                    "read",
++                    "handoff_compact",
++                    &json!({
++                        "mode":"read", "reason":"read the saved synthetic handoff",
++                        "handoff_id":handoff_id, "offset":0,
++                    })
++                    .to_string(),
++                ),
++                ev_completed("read"),
++            ]),
++            final_response(),
++        ],
++    )
++    .await;
++    test.submit_turn("Read the saved handoff as historical data.")
++        .await?;
++    let read_request = read_mock.last_request().context("read result request")?;
++    let read_output = read_request
++        .function_call_output_text("read")
++        .context("read tool result")?;
++    let page: serde_json::Value = serde_json::from_str(&read_output)?;
++    assert_eq!(page["content_kind"], "historical_data");
++    assert_eq!(page["handoff_page"]["historical_data"], true);
++    assert_eq!(page["handoff_page"]["text"], content);
++    assert_eq!(page["handoff_page"]["next_offset"], serde_json::Value::Null);
++    assert!(!read_output.contains(test.codex_home_path().to_string_lossy().as_ref()));
+     assert_eq!(result["compaction_started"], false);
+     Ok(())
+ }
+@@ -152,55 +295,120 @@ async fn handoff_prepare_rejects_invalid_or_oversized_source_before_snapshot() -
+         let server = responses::start_mock_server().await;
+         let test = test_codex().build(&server).await?;
+         std::fs::write(test.config.cwd.join("handoff.md"), content)?;
+-        let mock = responses::mount_sse_sequence(&server, vec![
+-            prepare_call(json!({
+-                "mode":"prepare", "reason":"test source bounds",
+-                "handoff_path":"handoff.md", "continuation":"wait",
+-            })),
+-            final_response(),
+-        ]).await;
++        let mock = responses::mount_sse_sequence(
++            &server,
++            vec![
++                prepare_call(json!({
++                    "mode":"prepare", "reason":"test source bounds",
++                    "handoff_path":"handoff.md", "continuation":"wait",
++                })),
++                final_response(),
++            ],
++        )
++        .await;
+         test.submit_turn("Prepare the synthetic handoff.").await?;
+         let request = mock.last_request().context("tool result request")?;
+-        let output = request.function_call_output_text("prepare").context("tool error")?;
++        let output = request
++            .function_call_output_text("prepare")
++            .context("tool error")?;
+         assert!(!output.contains("\"prepared\""));
+-        assert!(!test.codex_home_path().join("handoff-compact/handoffs").exists());
++        assert!(
++            !test
++                .codex_home_path()
++                .join("handoff-compact/handoffs")
++                .exists()
++        );
+     }
+     Ok(())
+ }
+ 
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+ #[ignore = "prepared handoffs are disabled until atomic index publication is implemented"]
+-async fn handoff_prepare_reads_selected_remote_environment_instead_of_local_namesake() -> Result<()> {
++async fn handoff_prepare_reads_selected_remote_environment_instead_of_local_namesake() -> Result<()>
++{
+     skip_if_no_remote_env!(Ok(()));
+     let server = responses::start_mock_server().await;
+-    let test = test_codex().build_with_remote_and_local_env(&server).await?;
++    let test = test_codex()
++        .build_with_remote_and_local_env(&server)
++        .await?;
+     let local_cwd = tempfile::tempdir()?;
+-    std::fs::write(local_cwd.path().join("handoff.md"), "WRONG_LOCAL_SYNTHETIC_HANDOFF")?;
++    std::fs::write(
++        local_cwd.path().join("handoff.md"),
++        "WRONG_LOCAL_SYNTHETIC_HANDOFF",
++    )?;
+     let remote_cwd = test.executor_environment().selection().cwd.clone();
+     let remote_path = remote_cwd.join("handoff.md")?;
+     let content = "CORRECT_REMOTE_SYNTHETIC_HANDOFF";
+-    test.fs().write_file(&remote_path, content.as_bytes().to_vec(),
+-        Default::default(), /*sandbox*/ None).await?;
+-    let mock = responses::mount_sse_sequence(&server, vec![
+-        prepare_call(json!({
+-            "mode":"prepare", "reason":"test remote environment selection",
+-            "handoff_path":"handoff.md", "environment_id":REMOTE_ENVIRONMENT_ID,
+-            "continuation":"wait",
+-        })),
+-        final_response(),
+-    ]).await;
++    test.fs()
++        .write_file(
++            &remote_path,
++            content.as_bytes().to_vec(),
++            Default::default(),
++            /*sandbox*/ None,
++        )
++        .await?;
++    let mock = responses::mount_sse_sequence(
++        &server,
++        vec![
++            prepare_call(json!({
++                "mode":"prepare", "reason":"test remote environment selection",
++                "handoff_path":"handoff.md", "environment_id":REMOTE_ENVIRONMENT_ID,
++                "continuation":"wait",
++            })),
++            final_response(),
++        ],
++    )
++    .await;
+     let remote = TurnEnvironmentSelection {
+         environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
+         cwd: remote_cwd.clone(),
+         workspace_roots: vec![remote_cwd],
+         config: EnvironmentConfigState::FromThread,
+     };
+-    test.submit_turn_with_environments("Prepare the remote synthetic handoff.",
+-        Some(vec![local(local_cwd.path().abs()), remote])).await?;
++    test.submit_turn_with_environments(
++        "Prepare the remote synthetic handoff.",
++        Some(vec![local(local_cwd.path().abs()), remote]),
++    )
++    .await?;
+     let request = mock.last_request().context("tool result request")?;
+-    let output = request.function_call_output_text("prepare").context("tool result")?;
++    let output = request
++        .function_call_output_text("prepare")
++        .context("tool result")?;
+     let result: serde_json::Value = serde_json::from_str(&output)?;
+-    let path = result["prepared"]["handoff_path"].as_str().context("snapshot path")?;
+-    assert_eq!(std::fs::read_to_string(path)?, content);
++    let handoff_id = result["prepared"]["handoff_id"]
++        .as_str()
++        .context("opaque snapshot ID")?;
++    assert!(result["prepared"].get("handoff_path").is_none());
++    let read_mock = responses::mount_sse_sequence(
++        &server,
++        vec![
++            sse(vec![
++                ev_function_call(
++                    "read",
++                    "handoff_compact",
++                    &json!({
++                        "mode":"read", "reason":"read the saved synthetic handoff",
++                        "handoff_id":handoff_id, "offset":0,
++                    })
++                    .to_string(),
++                ),
++                ev_completed("read"),
++            ]),
++            final_response(),
++        ],
++    )
++    .await;
++    test.submit_turn("Read the saved handoff as historical data.")
++        .await?;
++    let read_request = read_mock.last_request().context("read result request")?;
++    let read_output = read_request
++        .function_call_output_text("read")
++        .context("read tool result")?;
++    let page: serde_json::Value = serde_json::from_str(&read_output)?;
++    assert_eq!(page["content_kind"], "historical_data");
++    assert_eq!(page["handoff_page"]["historical_data"], true);
++    assert_eq!(page["handoff_page"]["text"], content);
++    assert_eq!(page["handoff_page"]["next_offset"], serde_json::Value::Null);
++    assert!(!read_output.contains(test.codex_home_path().to_string_lossy().as_ref()));
+     Ok(())
+ }
+diff --git a/codex-rs/exec-server/src/lib.rs b/codex-rs/exec-server/src/lib.rs
+index 2df15b632f0581649b88b6e3084be7bc0b776f1b..f5c05f4688adf5f033283ea78a4b7ee633ac075b 100644
+--- a/codex-rs/exec-server/src/lib.rs
++++ b/codex-rs/exec-server/src/lib.rs
+@@ -24,6 +24,8 @@ mod local_file_system;
+ mod local_process;
+ mod network_policy_decisions;
+ mod no_follow;
++pub use no_follow::AtomicPublication;
++pub use no_follow::NoFollowDirectory;
+ pub use no_follow::create_new_file_no_follow;
+ pub use no_follow::open_regular_file_no_follow;
+ pub use no_follow::read_bounded_file_no_follow;
+diff --git a/codex-rs/exec-server/src/no_follow/atomic_directory_tests.rs b/codex-rs/exec-server/src/no_follow/atomic_directory_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..19dbc315ddce2245341112c41629450e24969022
+--- /dev/null
++++ b/codex-rs/exec-server/src/no_follow/atomic_directory_tests.rs
+@@ -0,0 +1,68 @@
++// Copyright 2026 Ubadream
++// SPDX-License-Identifier: Apache-2.0
++
++use super::AtomicPublication;
++use super::Directory;
++use pretty_assertions::assert_eq;
++use std::io;
++
++#[test]
++fn atomic_store_failure_before_replace_preserves_previous_binding() -> io::Result<()> {
++    let temp = tempfile::tempdir()?;
++    let root = temp.path().canonicalize()?;
++    std::fs::write(root.join("binding.json"), "old binding")?;
++    let directory = Directory::open(&root)?;
++    let result = directory.publish_with_checks(
++        "binding.json",
++        b"new binding",
++        || Err(io::Error::other("synthetic failure before rename")),
++        || directory.sync(),
++    );
++    assert!(result.is_err());
++    assert_eq!(directory.read_bounded("binding.json", 1024)?, "old binding");
++    // Deliberately no path-based cleanup: the unrelated entry remains untouched.
++    assert_eq!(std::fs::read_dir(&root)?.count(), 2);
++    Ok(())
++}
++
++#[test]
++fn atomic_store_failure_after_replace_reports_visible_new_binding() -> io::Result<()> {
++    let temp = tempfile::tempdir()?;
++    let root = temp.path().canonicalize()?;
++    std::fs::write(root.join("binding.json"), "old binding")?;
++    let directory = Directory::open(&root)?;
++    let result = directory.publish_with_checks(
++        "binding.json",
++        b"new binding",
++        || Ok(()),
++        || Err(io::Error::other("synthetic directory sync failure")),
++    )?;
++    assert!(matches!(
++        result,
++        AtomicPublication::VisibleButDurabilityUnconfirmed(_)
++    ));
++    assert_eq!(directory.read_bounded("binding.json", 1024)?, "new binding");
++    Ok(())
++}
++
++#[test]
++fn atomic_store_names_are_single_entries_and_never_paths() -> io::Result<()> {
++    let temp = tempfile::tempdir()?;
++    let directory = Directory::open(&temp.path().canonicalize()?)?;
++    for name in [
++        "",
++        ".",
++        "..",
++        "../binding.json",
++        "child/file",
++        "child\\file",
++        "file:stream",
++        "bad\0name",
++    ] {
++        assert!(directory.create_new(name).is_err());
++        assert!(directory.read_bounded(name, 1024).is_err());
++        assert!(directory.publish(name, b"data").is_err());
++    }
++    assert_eq!(std::fs::read_dir(temp.path())?.count(), 0);
++    Ok(())
++}
+diff --git a/codex-rs/exec-server/src/no_follow/atomic_directory_unix.rs b/codex-rs/exec-server/src/no_follow/atomic_directory_unix.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..8170f6a0cd753edd562c4a3246ab90ac8a916edb
+--- /dev/null
++++ b/codex-rs/exec-server/src/no_follow/atomic_directory_unix.rs
+@@ -0,0 +1,128 @@
++// Copyright 2026 Ubadream
++// SPDX-License-Identifier: Apache-2.0
++//! Atomic index replacement anchored to a held Unix directory descriptor.
++
++use super::super::AtomicPublication;
++use super::parent;
++use rustix::fs::Mode;
++use rustix::fs::OFlags;
++use rustix::fs::fsync;
++use rustix::fs::openat;
++use rustix::fs::renameat;
++use std::io;
++use std::io::Read;
++use std::io::Write;
++use std::os::fd::OwnedFd;
++use std::path::Path;
++
++#[derive(Debug)]
++pub(crate) struct Directory {
++    parent: OwnedFd,
++}
++
++impl Directory {
++    pub(crate) fn open(path: &Path) -> io::Result<Self> {
++        let (parent, leaf) = parent(path)?;
++        let parent = openat(
++            &parent,
++            leaf,
++            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
++            Mode::empty(),
++        )
++        .map_err(io::Error::from)?;
++        Ok(Self { parent })
++    }
++
++    pub(crate) fn create_new(&self, leaf: &str) -> io::Result<std::fs::File> {
++        validate_leaf(leaf)?;
++        let file = openat(
++            &self.parent,
++            leaf,
++            OFlags::WRONLY
++                | OFlags::CREATE
++                | OFlags::EXCL
++                | OFlags::NOFOLLOW
++                | OFlags::NONBLOCK
++                | OFlags::CLOEXEC,
++            Mode::from_raw_mode(0o600),
++        )
++        .map_err(io::Error::from)?;
++        Ok(std::fs::File::from(file))
++    }
++
++    pub(crate) fn read_bounded(&self, leaf: &str, max_bytes: u64) -> io::Result<String> {
++        validate_leaf(leaf)?;
++        let limit = max_bytes.checked_add(1).ok_or_else(|| {
++            io::Error::new(io::ErrorKind::InvalidInput, "file byte limit overflow")
++        })?;
++        let file = openat(
++            &self.parent,
++            leaf,
++            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
++            Mode::empty(),
++        )
++        .map_err(io::Error::from)?;
++        let file = std::fs::File::from(file);
++        if !file.metadata()?.is_file() {
++            return Err(io::Error::new(
++                io::ErrorKind::InvalidInput,
++                "not a regular file",
++            ));
++        }
++        let mut bytes = Vec::new();
++        file.take(limit).read_to_end(&mut bytes)?;
++        if bytes.len() as u64 > max_bytes {
++            return Err(io::Error::new(
++                io::ErrorKind::InvalidData,
++                "file exceeds byte limit",
++            ));
++        }
++        String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
++    }
++
++    pub(crate) fn sync(&self) -> io::Result<()> {
++        fsync(&self.parent).map_err(io::Error::from)
++    }
++
++    pub(crate) fn publish(&self, leaf: &str, content: &[u8]) -> io::Result<AtomicPublication> {
++        self.publish_with_checks(leaf, content, || Ok(()), || self.sync())
++    }
++
++    fn publish_with_checks(
++        &self,
++        leaf: &str,
++        content: &[u8],
++        before_replace: impl FnOnce() -> io::Result<()>,
++        sync_after_replace: impl FnOnce() -> io::Result<()>,
++    ) -> io::Result<AtomicPublication> {
++        validate_leaf(leaf)?;
++        let pending = format!(".pending-{}.json", uuid::Uuid::new_v4());
++        let mut file = self.create_new(&pending)?;
++        file.write_all(content)?;
++        file.sync_all()?;
++        before_replace()?;
++        // Both names are relative to the same still-open directory descriptor.
++        // The existing destination is replaced as an entry, never opened/truncated.
++        renameat(&self.parent, pending.as_str(), &self.parent, leaf).map_err(io::Error::from)?;
++        match sync_after_replace() {
++            Ok(()) => Ok(AtomicPublication::Durable),
++            Err(error) => Ok(AtomicPublication::VisibleButDurabilityUnconfirmed(error)),
++        }
++        // Failures before rename intentionally retain an unreferenced temporary
++        // file. No racy path-based cleanup is performed here.
++    }
++}
++
++fn validate_leaf(leaf: &str) -> io::Result<()> {
++    if leaf.is_empty() || leaf == "." || leaf == ".." || leaf.contains(['/', '\\', ':', '\0']) {
++        return Err(io::Error::new(
++            io::ErrorKind::InvalidInput,
++            "expected a single storage entry name",
++        ));
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++#[path = "atomic_directory_tests.rs"]
++mod tests;
+diff --git a/codex-rs/exec-server/src/no_follow/bounded_store_tests.rs b/codex-rs/exec-server/src/no_follow/bounded_store_tests.rs
+index c62a3031f4174a9b6803531bb38812b73098e1d1..54dc8cafc555c730d6d3f0adf1e4bf2a552dd008 100644
+--- a/codex-rs/exec-server/src/no_follow/bounded_store_tests.rs
++++ b/codex-rs/exec-server/src/no_follow/bounded_store_tests.rs
+@@ -69,7 +69,10 @@ fn no_follow_store_rejects_final_and_ancestor_symlinks() -> std::io::Result<()>
+     assert!(read_bounded_file_no_follow(&parent_link.join("source.md"), 32).is_err());
+     assert!(create_new_file_no_follow(&parent_link.join("new.md")).is_err());
+     assert!(!outside.join("new.md").exists());
+-    assert_eq!(std::fs::read_to_string(outside.join("source.md"))?, "SYNTHETIC_OUTSIDE");
++    assert_eq!(
++        std::fs::read_to_string(outside.join("source.md"))?,
++        "SYNTHETIC_OUTSIDE"
++    );
+     Ok(())
+ }
+ 
+diff --git a/codex-rs/exec-server/src/no_follow/mod.rs b/codex-rs/exec-server/src/no_follow/mod.rs
+index 37031ff2eab4c52a2c030d270495b29e7f424cc4..dcfaf66e842b8c19985f0f33765d39ee5de4f2ff 100644
+--- a/codex-rs/exec-server/src/no_follow/mod.rs
++++ b/codex-rs/exec-server/src/no_follow/mod.rs
+@@ -17,6 +17,53 @@ use unix as imp;
+ #[cfg(windows)]
+ use windows as imp;
+ 
++/// The outcome after an atomic directory-entry replacement has become visible.
++/// An error returned by the operation itself means replacement did not complete.
++#[derive(Debug)]
++pub enum AtomicPublication {
++    Durable,
++    /// The replacement is visible, but directory durability could not be confirmed.
++    /// Read/reconcile current state before retrying; the old entry is not preserved.
++    VisibleButDurabilityUnconfirmed(io::Error),
++}
++
++/// A held no-follow directory handle for bounded reads and atomic publication.
++///
++/// This protects path traversal and entry replacement, not hostile processes with
++/// the same OS identity and write access to the held directory. Store ownership
++/// and the execution sandbox remain part of the security boundary.
++#[derive(Debug)]
++pub struct NoFollowDirectory {
++    inner: imp::Directory,
++}
++
++impl NoFollowDirectory {
++    pub fn open(path: &Path) -> io::Result<Self> {
++        imp::Directory::open(path).map(|inner| Self { inner })
++    }
++
++    /// Creates an exclusive new entry relative to this still-open directory.
++    pub fn create_new(&self, leaf: &str) -> io::Result<std::fs::File> {
++        self.inner.create_new(leaf)
++    }
++
++    /// Reads at most the configured UTF-8 byte bound through this directory handle.
++    pub fn read_bounded(&self, leaf: &str, max_bytes: u64) -> io::Result<String> {
++        self.inner.read_bounded(leaf, max_bytes)
++    }
++
++    /// Syncs this directory after publishing immutable, exclusive-created entries.
++    pub fn sync(&self) -> io::Result<()> {
++        self.inner.sync()
++    }
++
++    /// Atomically replaces a single entry without opening or truncating its target.
++    /// Pre-replacement failures can leave unreferenced private temporary files.
++    pub fn publish(&self, leaf: &str, content: &[u8]) -> io::Result<AtomicPublication> {
++        self.inner.publish(leaf, content)
++    }
++}
++
+ /// Creates a new regular file without following symlinks/reparse points in any
+ /// path component. Existing entries fail rather than being opened or truncated.
+ /// The returned handle is the only handle callers should use to write the file.
+@@ -33,14 +80,17 @@ pub fn open_regular_file_no_follow(path: &Path) -> io::Result<std::fs::File> {
+ /// Reads a regular UTF-8 file through a no-follow handle, rejecting oversized
+ /// files instead of truncating. Ancestor and final-component links are rejected.
+ pub fn read_bounded_file_no_follow(path: &Path, max_bytes: u64) -> io::Result<String> {
+-    let limit = max_bytes.checked_add(1).ok_or_else(|| {
+-        io::Error::new(io::ErrorKind::InvalidInput, "file byte limit overflow")
+-    })?;
++    let limit = max_bytes
++        .checked_add(1)
++        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "file byte limit overflow"))?;
+     let file = open_regular_file_no_follow(path)?;
+     let mut bytes = Vec::new();
+     file.take(limit).read_to_end(&mut bytes)?;
+     if bytes.len() as u64 > max_bytes {
+-        return Err(io::Error::new(io::ErrorKind::InvalidData, "file exceeds byte limit"));
++        return Err(io::Error::new(
++            io::ErrorKind::InvalidData,
++            "file exceeds byte limit",
++        ));
+     }
+     String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+ }
+diff --git a/codex-rs/exec-server/src/no_follow/unix.rs b/codex-rs/exec-server/src/no_follow/unix.rs
+index d2429f6b2f14a859b049c0a37b39012a0ff6e212..8d0cce73d94752c7a1eb8f4c687d267f014038a8 100644
+--- a/codex-rs/exec-server/src/no_follow/unix.rs
++++ b/codex-rs/exec-server/src/no_follow/unix.rs
+@@ -23,6 +23,10 @@ use std::path::Component;
+ use std::path::Path;
+ use std::path::PathBuf;
+ 
++#[path = "atomic_directory_unix.rs"]
++mod atomic_directory;
++pub(super) use atomic_directory::Directory;
++
+ #[cfg(any(target_os = "linux", target_os = "android"))]
+ fn directory_access_flags() -> OFlags {
+     OFlags::PATH
+@@ -118,10 +122,15 @@ pub(super) fn create_new_file_sync(path: &Path) -> io::Result<std::fs::File> {
+     let file = openat(
+         &parent,
+         leaf,
+-        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW
+-            | OFlags::NONBLOCK | OFlags::CLOEXEC,
++        OFlags::WRONLY
++            | OFlags::CREATE
++            | OFlags::EXCL
++            | OFlags::NOFOLLOW
++            | OFlags::NONBLOCK
++            | OFlags::CLOEXEC,
+         Mode::from_raw_mode(0o600),
+-    ).map_err(io::Error::from)?;
++    )
++    .map_err(io::Error::from)?;
+     Ok(std::fs::File::from(file))
+ }
+ 
+diff --git a/codex-rs/exec-server/src/no_follow/windows.rs b/codex-rs/exec-server/src/no_follow/windows.rs
+index ac8add3ae0658a189e371888a1738668614f8562..e99894b93e3a09d5afc3711f2c6a3f3e8181446e 100644
+--- a/codex-rs/exec-server/src/no_follow/windows.rs
++++ b/codex-rs/exec-server/src/no_follow/windows.rs
+@@ -1,3 +1,4 @@
++use super::AtomicPublication;
+ use crate::regular_file;
+ use std::ffi::OsStr;
+ use std::ffi::c_void;
+@@ -48,6 +49,40 @@ const STATUS_REPARSE_POINT_ENCOUNTERED: NTSTATUS = 0xC000_050B_u32 as i32;
+ const SECURITY_STATIC_TRACKING: u8 = 0;
+ const BOOLEAN_TRUE: u8 = 1;
+ 
++/// Windows atomic directory publication stays unavailable until a reviewed
++/// root-handle-anchored replace primitive has been implemented and exercised.
++#[derive(Debug)]
++pub(super) struct Directory;
++
++impl Directory {
++    pub(super) fn open(_path: &Path) -> io::Result<Self> {
++        Err(atomic_publication_unavailable())
++    }
++
++    pub(super) fn create_new(&self, _leaf: &str) -> io::Result<std::fs::File> {
++        Err(atomic_publication_unavailable())
++    }
++
++    pub(super) fn read_bounded(&self, _leaf: &str, _max_bytes: u64) -> io::Result<String> {
++        Err(atomic_publication_unavailable())
++    }
++
++    pub(super) fn sync(&self) -> io::Result<()> {
++        Err(atomic_publication_unavailable())
++    }
++
++    pub(super) fn publish(&self, _leaf: &str, _content: &[u8]) -> io::Result<AtomicPublication> {
++        Err(atomic_publication_unavailable())
++    }
++}
++
++fn atomic_publication_unavailable() -> io::Error {
++    io::Error::new(
++        io::ErrorKind::Unsupported,
++        "atomic no-follow directory publication is not implemented on Windows",
++    )
++}
++
+ #[repr(C)]
+ struct ObjectAttributes {
+     length: u32,
+diff --git a/codex-rs/hooks/src/events/post_tool_use.rs b/codex-rs/hooks/src/events/post_tool_use.rs
+index 8495acc4507bf4ff24bbfaa53f86fc9fbcb53ed4..2aa0b90960500a25a2eb1fc2295c99578f31383d 100644
+--- a/codex-rs/hooks/src/events/post_tool_use.rs
++++ b/codex-rs/hooks/src/events/post_tool_use.rs
+@@ -152,7 +152,9 @@ fn command_input_json(request: &PostToolUseRequest) -> Result<String, serde_json
+     let subagent = SubagentCommandInputFields::from(request.subagent.as_ref());
+     serde_json::to_string(&PostToolUseCommandInput {
+         session_id: request.session_id.to_string(),
+-        context_checkpoint_reminders_native: request.context_checkpoint_reminders_native.then_some(true),
++        context_checkpoint_reminders_native: request
++            .context_checkpoint_reminders_native
++            .then_some(true),
+         turn_id: request.turn_id.clone(),
+         agent_id: subagent.agent_id,
+         agent_type: subagent.agent_type,
