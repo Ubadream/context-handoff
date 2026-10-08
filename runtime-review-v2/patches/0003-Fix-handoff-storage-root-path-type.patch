@@ -1,0 +1,12 @@
+diff --git a/codex-rs/core/src/handoff_binding.rs b/codex-rs/core/src/handoff_binding.rs
+index b538b314c36b4f78f67e44bbaa7f1bba5bd8c2dc..50e2b28753312effee2c091b8d1a527b071566d6 100644
+--- a/codex-rs/core/src/handoff_binding.rs
++++ b/codex-rs/core/src/handoff_binding.rs
+@@ -80,6 +80,7 @@ fn storage_root(sess: &Session, turn: &TurnContext) -> PathBuf {
+         .codex_home
+         .join("handoff-compact/handoffs")
+         .join(sess.thread_id.to_string())
++        .to_path_buf()
+ }
+ 
+ fn open_store(sess: &Session, turn: &TurnContext) -> anyhow::Result<Option<Store>> {
