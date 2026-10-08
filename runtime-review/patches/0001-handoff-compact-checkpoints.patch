@@ -1,0 +1,2666 @@
+diff --git a/codex-rs/config/src/config_toml.rs b/codex-rs/config/src/config_toml.rs
+index 84b532177e34cb159313484d7990925672f064cb..2772fdc94fe5f6fef6f6fbc4a8cdd7f1dfde8f47 100644
+--- a/codex-rs/config/src/config_toml.rs
++++ b/codex-rs/config/src/config_toml.rs
+@@ -187,6 +187,22 @@ pub struct ConfigToml {
+     #[schemars(range(min = 0, max = 100))]
+     pub model_post_turn_compact_threshold_percent: Option<u8>,
+ 
++    /// Deliver thread-bound handoff reminders at model request boundaries.
++    /// Omitted or false leaves checkpoint reminders to existing tool hooks.
++    pub context_checkpoint_reminders: Option<bool>,
++
++    /// Optional early task-completion review threshold; omitted disables this stage.
++    #[schemars(range(min = 1))]
++    pub context_checkpoint_review_tokens: Option<i64>,
++
++    /// Active-context tokens at which to update and read back the handoff (default 240000).
++    #[schemars(range(min = 1))]
++    pub context_checkpoint_prepare_tokens: Option<i64>,
++
++    /// Active-context tokens at which to save the increment and request compaction (default 265000).
++    #[schemars(range(min = 1))]
++    pub context_checkpoint_compact_tokens: Option<i64>,
++
+     /// Default approval policy for executing commands.
+     #[schemars(with = "Option<crate::schema::ConfigAskForApproval>")]
+     pub approval_policy: Option<AskForApproval>,
+diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
+index af8f05ee51c34ca281ad72b03e3fe22175a88579..6623b27f75127e8971f38a784290ff8beac1e66e 100644
+--- a/codex-rs/core/config.schema.json
++++ b/codex-rs/core/config.schema.json
+@@ -6665,6 +6665,28 @@
+     "computer_use": {
+       "$ref": "#/definitions/ComputerUseConfigToml"
+     },
++    "context_checkpoint_compact_tokens": {
++      "description": "Active-context tokens at which to save the increment and request compaction (default 265000).",
++      "format": "int64",
++      "minimum": 1.0,
++      "type": "integer"
++    },
++    "context_checkpoint_prepare_tokens": {
++      "description": "Active-context tokens at which to update and read back the handoff (default 240000).",
++      "format": "int64",
++      "minimum": 1.0,
++      "type": "integer"
++    },
++    "context_checkpoint_reminders": {
++      "description": "Deliver thread-bound handoff reminders at model request boundaries. Omitted or false leaves checkpoint reminders to existing tool hooks.",
++      "type": "boolean"
++    },
++    "context_checkpoint_review_tokens": {
++      "description": "Optional early task-completion review threshold; omitted disables this stage.",
++      "format": "int64",
++      "minimum": 1.0,
++      "type": "integer"
++    },
+     "default_permissions": {
+       "description": "Default permissions profile to apply. Names starting with `:` refer to built-in profiles; other names are resolved from the `[permissions]` table.",
+       "type": "string"
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index a937b39db0e4abb8067d28497f63839b8428e49d..b7809a6765b94f038458a31e199b02f6b24d45df 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -354,7 +354,13 @@ async fn run_compact_task_inner_impl(
+         get_last_assistant_message_from_turn(history_snapshot.raw_items()).unwrap_or_default()
+     };
+     let summary_text = format!("{SUMMARY_PREFIX}\n{summary_suffix}");
+-    let user_messages = collect_annotated_user_messages(history_items);
++    let mut user_messages = collect_annotated_user_messages(history_items);
++    let handoff = crate::handoff_binding::load(&sess, &turn_context)
++        .await
++        .map_err(|e| CodexErr::InvalidRequest(format!("Handoff could not be loaded; history was not replaced: {e}")))?;
++    if handoff.is_some() {
++        user_messages.pop();
++    }
+ 
+     let mut new_history = build_compacted_history(Vec::new(), &user_messages, &summary_text);
+     if let Some(summary_item) = new_history.last_mut() {
+@@ -362,6 +368,9 @@ async fn run_compact_task_inner_impl(
+         // belongs to this compaction turn.
+         summary_item.set_turn_id_if_missing(&turn_context.sub_id);
+     }
++    if let Some(handoff) = &handoff {
++        crate::handoff_binding::append(&sess, handoff, &mut new_history).await;
++    }
+     let (window_number, window_ids) = sess.advance_auto_compact_window().await;
+ 
+     let (initial_context, world_state_baseline) =
+diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
+index fcc6064f18cb353feb08ef8ab6e26eef883f20b8..e61c562b40de693f2dc517d379cfa56f5d954e68 100644
+--- a/codex-rs/core/src/compact_remote_v2.rs
++++ b/codex-rs/core/src/compact_remote_v2.rs
+@@ -308,7 +308,7 @@ async fn run_remote_compact_task_inner_impl(
+         analytics_details.cached_input_tokens = Some(token_usage.cached_input_tokens);
+         analytics_details.cache_write_input_tokens = Some(token_usage.cache_write_input_tokens);
+     }
+-    let (compacted_history, retained_images) = build_v2_compacted_history(
++    let (mut compacted_history, retained_images) = build_v2_compacted_history(
+         prompt_input,
+         prompt_input_metadata,
+         compaction_output,
+@@ -319,6 +319,13 @@ async fn run_remote_compact_task_inner_impl(
+             RetainedImageBudget::Disabled
+         },
+     );
++    if let Some(handoff) = crate::handoff_binding::load(sess, turn_context)
++        .await
++        .map_err(|e| CodexErr::InvalidRequest(format!("Handoff could not be loaded; history was not replaced: {e}")))?
++    {
++        crate::handoff_binding::remove_covered(&handoff, &mut compacted_history);
++        crate::handoff_binding::append(sess, &handoff, &mut compacted_history).await;
++    }
+     analytics_details.retained_image_count = Some(retained_images);
+     let (new_window_number, new_window_ids) = sess.advance_auto_compact_window().await;
+     let (initial_context, world_state_baseline) =
+diff --git a/codex-rs/core/src/config/config_tests.rs b/codex-rs/core/src/config/config_tests.rs
+index fca03ece47c14a50a40bef4d8849f5c083ba3ebc..83ed2ba018a6135972066efab9129dbaa5603fed 100644
+--- a/codex-rs/core/src/config/config_tests.rs
++++ b/codex-rs/core/src/config/config_tests.rs
+@@ -991,6 +991,49 @@ async fn load_current_time_reminder_config(config_toml: &str) -> std::io::Result
+     .await
+ }
+ 
++#[tokio::test]
++async fn checkpoint_reminder_threshold_config_loads_and_rejects_unreachable_stages()
++-> std::io::Result<()> {
++    let codex_home = tempdir()?;
++    let load = |text: &str| {
++        Config::load_from_base_config_with_overrides(
++            toml::from_str(text).expect("valid TOML"),
++            ConfigOverrides::default(),
++            codex_home.abs(),
++        )
++    };
++    let custom = load("context_checkpoint_reminders = true\ncontext_checkpoint_review_tokens = 265000\ncontext_checkpoint_prepare_tokens = 350000\ncontext_checkpoint_compact_tokens = 430000\nmodel_context_window = 500000\nmodel_auto_compact_token_limit = 450000\n").await?;
++    assert_eq!(
++        (
++            custom.context_checkpoint_review_tokens,
++            custom.context_checkpoint_prepare_tokens,
++            custom.context_checkpoint_compact_tokens
++        ),
++        (Some(265_000), 350_000, 430_000)
++    );
++    let legacy = load("").await?;
++    assert_eq!(
++        (
++            legacy.context_checkpoint_prepare_tokens,
++            legacy.context_checkpoint_compact_tokens
++        ),
++        (240_000, 265_000)
++    );
++    assert_eq!(legacy.context_checkpoint_review_tokens, None);
++    for text in [
++        "context_checkpoint_prepare_tokens = 0",
++        "context_checkpoint_review_tokens = 0",
++        "context_checkpoint_review_tokens = 350000\ncontext_checkpoint_prepare_tokens = 350000",
++        "context_checkpoint_prepare_tokens = 430000\ncontext_checkpoint_compact_tokens = 350000",
++        "context_checkpoint_reminders = true\ncontext_checkpoint_compact_tokens = 450000\nmodel_context_window = 500000",
++        "context_checkpoint_reminders = true\ncontext_checkpoint_compact_tokens = 430000\nmodel_auto_compact_token_limit = 420000",
++    ] {
++        let error = load(text).await.expect_err("invalid reminder thresholds");
++        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
++    }
++    Ok(())
++}
++
+ #[test]
+ fn rejects_provider_auth_with_env_key() {
+     let err = toml::from_str::<ConfigToml>(
+diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
+index 571fc2d81b51d77f34084f28b296ebd1931b31e2..59689945927655e25e5f0be03f5b8f1f1caeac4b 100644
+--- a/codex-rs/core/src/config/mod.rs
++++ b/codex-rs/core/src/config/mod.rs
+@@ -642,6 +642,14 @@ pub struct Config {
+     /// Zero disables turn-end compaction.
+     pub model_post_turn_compact_threshold_percent: u8,
+ 
++    /// Deliver checkpoint reminders independently of tool activity.
++    pub context_checkpoint_reminders: bool,
++
++    /// Active-context thresholds for handoff preparation and compaction action.
++    pub context_checkpoint_review_tokens: Option<i64>,
++    pub context_checkpoint_prepare_tokens: i64,
++    pub context_checkpoint_compact_tokens: i64,
++
+     /// Key into the model_providers map that specifies which provider to use.
+     pub model_provider_id: String,
+ 
+@@ -3243,6 +3251,42 @@ impl Config {
+                 "model_post_turn_compact_threshold_percent must be between 0 and 100",
+             ));
+         }
++        let context_checkpoint_prepare_tokens = cfg.context_checkpoint_prepare_tokens.unwrap_or(240_000);
++        let context_checkpoint_compact_tokens = cfg.context_checkpoint_compact_tokens.unwrap_or(265_000);
++        if context_checkpoint_prepare_tokens <= 0
++            || context_checkpoint_prepare_tokens >= context_checkpoint_compact_tokens
++        {
++            return Err(std::io::Error::new(
++                std::io::ErrorKind::InvalidInput,
++                "context checkpoint thresholds must satisfy 0 < prepare < compact",
++            ));
++        }
++        if cfg.context_checkpoint_review_tokens.is_some_and(|review| {
++            review <= 0 || review >= context_checkpoint_prepare_tokens
++        }) {
++            return Err(std::io::Error::new(
++                std::io::ErrorKind::InvalidInput,
++                "context checkpoint review must satisfy 0 < review < prepare",
++            ));
++        }
++        let custom_checkpoint_thresholds = cfg.context_checkpoint_prepare_tokens.is_some()
++            || cfg.context_checkpoint_compact_tokens.is_some();
++        let compact_safety_limit = [
++            cfg.model_auto_compact_token_limit,
++            cfg.model_context_window.map(|window| window.saturating_mul(9) / 10),
++        ]
++        .into_iter()
++        .flatten()
++        .min();
++        if cfg.context_checkpoint_reminders.unwrap_or_default()
++            && custom_checkpoint_thresholds
++            && compact_safety_limit.is_some_and(|limit| context_checkpoint_compact_tokens >= limit)
++        {
++            return Err(std::io::Error::new(
++                std::io::ErrorKind::InvalidInput,
++                "context checkpoint compaction action must precede the automatic compaction limit",
++            ));
++        }
+         if let Some(responses_api_metadata) = cfg.responses_api_metadata.as_ref() {
+             validate_extra_metadata(responses_api_metadata.iter()).map_err(|message| {
+                 std::io::Error::new(std::io::ErrorKind::InvalidInput, message)
+@@ -4268,6 +4312,10 @@ impl Config {
+             model_post_turn_compact_threshold_percent: cfg
+                 .model_post_turn_compact_threshold_percent
+                 .unwrap_or_default(),
++            context_checkpoint_reminders: cfg.context_checkpoint_reminders.unwrap_or_default(),
++            context_checkpoint_review_tokens: cfg.context_checkpoint_review_tokens,
++            context_checkpoint_prepare_tokens,
++            context_checkpoint_compact_tokens,
+             model_provider_id,
+             model_provider,
+             cwd: resolved_cwd,
+diff --git a/codex-rs/core/src/context/checkpoint_reminder.rs b/codex-rs/core/src/context/checkpoint_reminder.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..d58fa369dd39f0fcc5220f6e90d449fdf1264ddd
+--- /dev/null
++++ b/codex-rs/core/src/context/checkpoint_reminder.rs
+@@ -0,0 +1,58 @@
++// Copyright 2026 Ubadream
++// SPDX-License-Identifier: Apache-2.0
++
++use super::ContextualUserFragment;
++use codex_protocol::models::ContentItemKind;
++
++pub(crate) struct CheckpointReminder {
++    pub(crate) window_id: String,
++    pub(crate) thread_id: String,
++    pub(crate) used: i64,
++    pub(crate) threshold: i64,
++    pub(crate) compact_threshold: i64,
++    pub(crate) review_threshold: Option<i64>,
++}
++
++impl ContextualUserFragment for CheckpointReminder {
++    fn content_kind(&self) -> ContentItemKind {
++        ContentItemKind("context.checkpoint_reminder".to_string())
++    }
++
++    fn role(&self) -> &'static str {
++        "developer"
++    }
++
++    fn markers(&self) -> (&'static str, &'static str) {
++        Self::type_markers()
++    }
++
++    fn type_markers() -> (&'static str, &'static str) {
++        ("<context_checkpoint_reminder>", "</context_checkpoint_reminder>")
++    }
++
++    fn body(&self) -> String {
++        let Self {
++            window_id, thread_id, used, threshold, compact_threshold, review_threshold,
++        } = self;
++        let action = if review_threshold == &Some(*threshold) {
++            format!("Reached {threshold} tokens. Review task completion. Pending reviews, unfinished tests, and unsaved outputs are not complete. If authorized work remains, continue it; this review does not require compaction or authorize new work.")
++        } else if threshold == compact_threshold {
++            format!("Reached {threshold} tokens. Save changes, read back the existing project handoff, and request A or C compaction at the next safe boundary. Finish in-flight operations before starting another work stage.")
++        } else {
++            format!("Reached {threshold} tokens. Update and read back the handoff. Preserve references to details still needed. If the next operation may exceed {compact_threshold} tokens, compact at a safe boundary first; otherwise continue within existing authorization.")
++        };
++        let handoff_scope = if review_threshold == &Some(*threshold) {
++            "Follow the handoff steps only when there are changes to preserve or compaction is appropriate. "
++        } else {
++            ""
++        };
++        format!(
++            "window_id={window_id}; threshold={threshold}\n\
++             Runtime context usage: {used} tokens; thread: {thread_id}. {action}\n\
++             {handoff_scope}Use the existing task handoff, or create a concise UTF-8 handoff under CODEX_HOME/handoff-compact/handoffs/. \
++             Record the current request once, completed work and evidence, unfinished work, in-flight operations, and the next entry point. \
++             Prepared handoffs, request binding, and automatic handoff continuation are disabled in this build; do not call prepare or retry it. Use the existing authorized project handoff workflow. \
++             Scheduled compaction runs after the final response. On the next authorized turn, read the project handoff; old reminders are historical and do not restart completed work."
++        )
++    }
++}
+diff --git a/codex-rs/core/src/context/contextual_user_message.rs b/codex-rs/core/src/context/contextual_user_message.rs
+index a74f10a616479a181d26f701f6d869245484206d..666e77f63185c8802f0ab77383b2d39c88bcacdd 100644
+--- a/codex-rs/core/src/context/contextual_user_message.rs
++++ b/codex-rs/core/src/context/contextual_user_message.rs
+@@ -34,6 +34,7 @@ const CONTEXTUAL_USER_FRAGMENT_MATCHERS: &[fn(&str) -> bool] = &[
+     LegacyUnifiedExecProcessLimitWarning::matches_text,
+     LegacyApplyPatchExecCommandWarning::matches_text,
+     LegacyModelMismatchWarning::matches_text,
++    super::HandoffCompactNotice::matches_text,
+ ];
+ 
+ /// Hidden runtime context is not user authorization. Explicit user goal edits are.
+diff --git a/codex-rs/core/src/context/handoff_compact_notice.rs b/codex-rs/core/src/context/handoff_compact_notice.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..9152c9d9e290ca9901008f842023e55d1edfa84b
+--- /dev/null
++++ b/codex-rs/core/src/context/handoff_compact_notice.rs
+@@ -0,0 +1,26 @@
++// Copyright 2026 Ubadream
++// SPDX-License-Identifier: Apache-2.0
++
++use super::ContextualUserFragment;
++use codex_protocol::models::ContentItemKind;
++
++/// Bounded local checkpoint metadata; never contains the archived dialogue itself.
++pub(crate) struct HandoffCompactNotice(pub(crate) String);
++
++impl ContextualUserFragment for HandoffCompactNotice {
++    fn content_kind(&self) -> ContentItemKind {
++        ContentItemKind("handoff_compact.notice".to_string())
++    }
++    fn role(&self) -> &'static str {
++        "user"
++    }
++    fn markers(&self) -> (&'static str, &'static str) {
++        Self::type_markers()
++    }
++    fn type_markers() -> (&'static str, &'static str) {
++        ("<handoff_compact_history>", "</handoff_compact_history>")
++    }
++    fn body(&self) -> String {
++        self.0.clone()
++    }
++}
+diff --git a/codex-rs/core/src/context/mod.rs b/codex-rs/core/src/context/mod.rs
+index 19af10dac2f2e5dc0d8ab14927dd65a210eea82a..5368641de4eff6f1c0d2023f3bf81d0587b9e5e3 100644
+--- a/codex-rs/core/src/context/mod.rs
++++ b/codex-rs/core/src/context/mod.rs
+@@ -5,7 +5,9 @@ mod approved_command_prefix_saved;
+ mod apps_instructions;
+ mod available_plugins_instructions;
+ mod base_instructions;
++mod checkpoint_reminder;
+ mod compaction_summary;
++pub(crate) use checkpoint_reminder::CheckpointReminder;
+ mod contextual_user_message;
+ mod current_time_reminder;
+ mod developer_instructions;
+@@ -52,6 +54,8 @@ mod unsupported_media;
+ mod user_instructions;
+ mod user_shell_command;
+ mod user_verification_notice;
++mod handoff_compact_notice;
++pub(crate) use handoff_compact_notice::HandoffCompactNotice;
+ pub(crate) mod world_state;
+ 
+ pub(crate) use agent_message_board_notification::AgentMessageBoardNotification;
+diff --git a/codex-rs/core/src/handoff_binding.rs b/codex-rs/core/src/handoff_binding.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..bcf03e528935435d23abd3451562eb01d9a18d4e
+--- /dev/null
++++ b/codex-rs/core/src/handoff_binding.rs
+@@ -0,0 +1,229 @@
++// Copyright 2026 Ubadream
++// SPDX-License-Identifier: Apache-2.0
++
++//! Task-bound handoff for the last request, independent of the summary writer.
++use crate::compact::is_summary_message;
++use crate::context::ContextualUserFragment;
++use crate::context::HandoffCompactNotice;
++use crate::session::session::Session;
++use crate::session::turn_context::TurnContext;
++use anyhow::Context;
++use anyhow::bail;
++use codex_history::ResponseItemEnvelope;
++use codex_protocol::items::TurnItem;
++use codex_protocol::models::ContentItem;
++use codex_protocol::models::ResponseItem;
++use serde::Deserialize;
++use serde::Serialize;
++use sha1::Digest;
++use sha1::Sha1;
++use std::io::Write;
++use std::path::Path;
++use std::path::PathBuf;
++
++pub(crate) const MAX_HANDOFF_BYTES: u64 = 32 * 1024;
++
++/// Fixed-index publication is intentionally unavailable until a cross-platform,
++/// directory-handle-anchored atomic replace operation has been implemented and tested.
++/// There is no configuration or environment-variable bypass for this gate.
++pub(crate) fn ensure_storage_available() -> anyhow::Result<()> {
++    bail!("Prepared handoffs are disabled pending atomic no-follow snapshot-index publication")
++}
++
++#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
++#[serde(rename_all = "snake_case")]
++pub(crate) enum Continuation {
++    Continue,
++    Wait,
++}
++
++#[derive(Deserialize, Serialize)]
++pub(crate) struct Binding {
++    thread_id: String,
++    source_message_id: String,
++    source_text_sha1: String,
++    pub(crate) handoff_path: PathBuf,
++    handoff_sha1: String,
++    continuation: Continuation,
++}
++
++fn digest(text: &str) -> String {
++    // Change detection for local owned files, not authentication of untrusted data.
++    format!("{:x}", Sha1::digest(text.as_bytes()))
++}
++
++fn read_bounded(path: &Path) -> anyhow::Result<String> {
++    let text = codex_exec_server::read_bounded_file_no_follow(path, MAX_HANDOFF_BYTES)?;
++    if text.trim().is_empty() {
++        bail!("Handoff must not be empty");
++    }
++    Ok(text)
++}
++
++pub(crate) fn request_text(item: &ResponseItem) -> Option<String> {
++    match crate::event_mapping::parse_turn_item(item) {
++        Some(TurnItem::UserMessage(message)) if !is_summary_message(&message.message()) => {
++            Some(message.message())
++        }
++        _ => None,
++    }
++}
++
++async fn last_request(sess: &Session) -> Option<(String, String)> {
++    let history = sess.clone_history().await;
++    history.annotated_items().iter().rev().find_map(|envelope| {
++        let item = &envelope.item;
++        let text = request_text(item)?;
++        Some((item.id()?.to_string(), digest(&text)))
++    })
++}
++
++/// Freeze handoff text already read through the selected environment's filesystem policy.
++/// The caller must not pass text from an unrestricted host-path read.
++pub(crate) async fn prepare(
++    sess: &Session,
++    turn: &TurnContext,
++    text: &str,
++    continuation: Continuation,
++) -> anyhow::Result<Binding> {
++    ensure_storage_available()?;
++    if text.len() as u64 > MAX_HANDOFF_BYTES || text.trim().is_empty() {
++        bail!("Handoff must contain non-empty UTF-8 text of at most 32 KiB");
++    }
++    let (source_message_id, source_text_sha1) = last_request(sess)
++        .await
++        .context("No user request in this thread can be bound")?;
++    let root = turn
++        .config
++        .codex_home
++        .join("handoff-compact/handoffs")
++        .join(sess.thread_id.to_string());
++    if root.to_string_lossy().len() > 1024 {
++        bail!("Handoff directory path is too long");
++    }
++    codex_exec_server::ExecutorFileSystem::create_directory(
++        &codex_exec_server::LocalFileSystem::unsandboxed(),
++        &codex_utils_path_uri::PathUri::from_host_native_path(&root)?,
++        codex_exec_server::CreateDirectoryOptions {
++            recursive: true,
++            follow_symlinks: false,
++        },
++        /*sandbox*/ None,
++    ).await?;
++    let snapshot = root.join(format!("{}.md", uuid::Uuid::new_v4()));
++    let mut file = codex_exec_server::create_new_file_no_follow(&snapshot)?;
++    file.write_all(text.as_bytes())?;
++    file.sync_all()?;
++    if read_bounded(&snapshot)? != text {
++        bail!("Handoff snapshot read-back did not match");
++    }
++    let binding = Binding {
++        thread_id: sess.thread_id.to_string(),
++        source_message_id,
++        source_text_sha1,
++        handoff_path: snapshot.to_path_buf(),
++        handoff_sha1: digest(text),
++        continuation,
++    };
++    // Never fall back to path-based tempfile/rename or truncate an existing index.
++    // Keep the immutable snapshot unreferenced until a safe atomic index writer exists.
++    let _ = binding;
++    bail!("Atomic handoff-index publication is not implemented")
++}
++
++pub(crate) async fn load(sess: &Session, turn: &TurnContext) -> anyhow::Result<Option<Binding>> {
++    if ensure_storage_available().is_err() {
++        // Ordinary native compaction must keep the original user request when the
++        // optional handoff store is unavailable, without touching any saved index.
++        return Ok(None);
++    }
++    let root = turn
++        .config
++        .codex_home
++        .join("handoff-compact/handoffs")
++        .join(sess.thread_id.to_string());
++    let text = match read_bounded(&root.join("binding.json")) {
++        Ok(text) => text,
++        Err(error)
++            if error
++                .downcast_ref::<std::io::Error>()
++                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
++        {
++            return Ok(None);
++        }
++        Err(error) => return Err(error),
++    };
++    let binding: Binding = serde_json::from_str(&text)?;
++    if binding.thread_id != sess.thread_id.to_string()
++        || binding.handoff_path.parent() != Some(root.as_path())
++    {
++        bail!("Handoff binding does not belong to this thread");
++    }
++    if last_request(sess).await
++        != Some((
++            binding.source_message_id.clone(),
++            binding.source_text_sha1.clone(),
++        ))
++    {
++        // A newer request must never be replaced by a handoff for an older one.
++        return Ok(None);
++    }
++    if digest(&read_bounded(&binding.handoff_path)?) != binding.handoff_sha1 {
++        bail!("Handoff snapshot changed; keep the original request and reject this binding");
++    }
++    Ok(Some(binding))
++}
++
++pub(crate) async fn append(
++    sess: &Session,
++    binding: &Binding,
++    history: &mut Vec<ResponseItemEnvelope>,
++) {
++    let next = match binding.continuation {
++        Continuation::Continue => "Read the handoff and continue only unfinished work already authorized by the user.",
++        Continuation::Wait => "Read the handoff to confirm the stopping point. Work is complete or awaiting the user decision; do not start new work.",
++    };
++    history.push(ResponseItemEnvelope::new(ContextualUserFragment::into(HandoffCompactNotice(format!(
++        "Compaction complete. Handoff for thread {}: {} (content fingerprint {}). {next} The handoff records the request and completed and unfinished work. Original text remains in the source rollout as historical data. Newer user messages take precedence.",
++        binding.thread_id, binding.handoff_path.display(), binding.handoff_sha1,
++    )))));
++    let turn_state = {
++        let active = sess.active_turn.lock().await;
++        active
++            .as_ref()
++            .map(|active| std::sync::Arc::clone(&active.turn_state))
++    };
++    if let Some(state) = turn_state {
++        state.lock().await.handoff_binding_resume = binding.continuation == Continuation::Continue;
++    }
++}
++
++/// Replace the covered remote request by identity, preserving any media payloads.
++pub(crate) fn remove_covered(binding: &Binding, history: &mut Vec<ResponseItemEnvelope>) {
++    if let Some(index) = history.iter().rposition(|item| {
++        item.item
++            .id()
++            .is_some_and(|id| id.to_string() == binding.source_message_id)
++    }) {
++        if let ResponseItem::Message { content, .. } = &mut history[index].item
++            && content.iter().any(|item| {
++                matches!(
++                    item,
++                    ContentItem::InputImage { .. } | ContentItem::InputAudio { .. }
++                )
++            })
++        {
++            for item in content {
++                if let ContentItem::InputText { text } = item {
++                    *text = "Original request text is covered by the thread handoff; attachments are preserved.".to_string();
++                }
++            }
++            return;
++        }
++        history.remove(index);
++    }
++}
++
++#[cfg(test)]
++#[path = "handoff_binding_tests.rs"]
++mod tests;
+diff --git a/codex-rs/core/src/handoff_binding_tests.rs b/codex-rs/core/src/handoff_binding_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..6b47af103d45298899ff4ad1fa51c4e0d6b7f405
+--- /dev/null
++++ b/codex-rs/core/src/handoff_binding_tests.rs
+@@ -0,0 +1,59 @@
++// Copyright 2026 Ubadream
++// SPDX-License-Identifier: Apache-2.0
++
++use super::*;
++use pretty_assertions::assert_eq;
++use serde_json::json;
++
++#[test]
++fn remote_handoff_replaces_only_bound_identity_and_preserves_media() {
++    let binding = Binding {
++        thread_id: "task".to_string(),
++        source_message_id: "msg_latest".to_string(),
++        source_text_sha1: digest("repeated words"),
++        handoff_path: PathBuf::from("handoff.md"),
++        handoff_sha1: digest("handoff"),
++        continuation: Continuation::Continue,
++    };
++    let older: ResponseItem = serde_json::from_value(json!({
++        "type":"message", "role":"user", "id":"msg_older",
++        "content":[{"type":"input_text","text":"repeated words"}]
++    }))
++    .unwrap();
++    let latest: ResponseItem = serde_json::from_value(json!({
++        "type":"message", "role":"user", "id":"msg_latest",
++        "content":[{"type":"input_text","text":"repeated words"},
++            {"type":"input_image","image_url":"data:image/png;base64,aGVsbG8="}]
++    }))
++    .unwrap();
++    let mut items = vec![
++        ResponseItemEnvelope::new(older.clone()),
++        ResponseItemEnvelope::new(latest),
++    ];
++    remove_covered(&binding, &mut items);
++    assert_eq!(items[0].item, older);
++    if let ResponseItem::Message { content, .. } = &items[1].item {
++        assert_eq!(content.len(), 2);
++        assert!(
++            matches!(&content[0], ContentItem::InputText { text } if text == "Original request text is covered by the thread handoff; attachments are preserved.")
++        );
++        assert!(matches!(&content[1], ContentItem::InputImage { .. }));
++    } else {
++        panic!("media message must remain");
++    }
++    let mut old_only = vec![ResponseItemEnvelope::new(older.clone())];
++    remove_covered(&binding, &mut old_only);
++    assert_eq!(old_only[0].item, older);
++}
++
++#[test]
++fn handoff_read_rejects_empty_and_oversize_instead_of_truncating() {
++    let dir = tempfile::tempdir().unwrap();
++    let path = dir.path().join("handoff.md");
++    std::fs::write(&path, " ").unwrap();
++    assert!(read_bounded(&path).is_err());
++    std::fs::write(&path, "x".repeat(MAX_HANDOFF_BYTES as usize + 1)).unwrap();
++    assert!(read_bounded(&path).is_err());
++    std::fs::write(&path, "Synthetic request and continuation point").unwrap();
++    assert_eq!(read_bounded(&path).unwrap(), "Synthetic request and continuation point");
++}
+diff --git a/codex-rs/core/src/handoff_compact.rs b/codex-rs/core/src/handoff_compact.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..8e35a7cafad832bcbac0ac40d4559cb3b42b87b2
+--- /dev/null
++++ b/codex-rs/core/src/handoff_compact.rs
+@@ -0,0 +1,183 @@
++// Copyright 2026 Ubadream
++// SPDX-License-Identifier: Apache-2.0
++
++//! Turn-local compaction choices; history replacement stays in the native task.
++use crate::session::session::Session;
++use crate::session::turn_context::TurnContext;
++use codex_protocol::error::CodexErr;
++use codex_protocol::error::Result as CodexResult;
++use serde::Deserialize;
++use serde::Serialize;
++use std::io::BufReader;
++use std::io::Seek;
++use std::io::SeekFrom;
++use std::io::Write;
++use std::path::PathBuf;
++use std::sync::Arc;
++
++#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
++pub(crate) enum Mode {
++    A,
++    C,
++    #[serde(rename = "prepare")]
++    Prepare,
++    #[serde(rename = "cancel")]
++    Cancel,
++}
++
++pub(crate) async fn take(sess: &Session) -> Option<Mode> {
++    let turn_state = {
++        let active = sess.active_turn.lock().await;
++        Arc::clone(&active.as_ref()?.turn_state)
++    };
++    let mut state = turn_state.lock().await;
++    state.handoff_binding_resume = false;
++    state.handoff_compact.take()
++}
++
++pub(crate) async fn archive(sess: &Session, turn: &TurnContext) -> CodexResult<PathBuf> {
++    sess.flush_rollout().await?;
++    let source = sess
++        .hook_transcript_path()
++        .await
++        .ok_or_else(|| CodexErr::InvalidRequest("C requires a persisted transcript".to_string()))?;
++    let sid = sess.thread_id.to_string();
++    let directory = turn.config.codex_home.join("handoff-compact/originals");
++    codex_exec_server::ExecutorFileSystem::create_directory(
++        &codex_exec_server::LocalFileSystem::unsandboxed(),
++        &codex_utils_path_uri::PathUri::from_host_native_path(&directory)
++            .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?,
++        codex_exec_server::CreateDirectoryOptions {
++            recursive: true,
++            follow_symlinks: false,
++        },
++        /*sandbox*/ None,
++    ).await?;
++    let path = directory.join(format!("{}_{}.jsonl", sess.thread_id, uuid::Uuid::new_v4()));
++    tokio::task::spawn_blocking(move || {
++        export_originals(std::path::Path::new(&source), &sid, path.as_path())
++    })
++    .await
++    .map_err(|e| CodexErr::InvalidRequest(e.to_string()))?
++}
++
++// Unknown fields (tool outputs, encrypted reasoning and image bytes) are skipped by
++// serde rather than copied into a Value or loaded as an entire rollout-sized string.
++#[derive(Deserialize)]
++struct ArchiveRecord {
++    #[serde(rename = "type")]
++    kind: String,
++    payload: ArchivePayload,
++}
++
++#[derive(Deserialize)]
++struct ArchivePayload {
++    #[serde(rename = "type")]
++    kind: Option<String>,
++    id: Option<String>,
++    role: Option<String>,
++    channel: Option<String>,
++    content: Option<Vec<ArchiveText>>,
++    internal_chat_message_metadata_passthrough: Option<ArchiveMetadata>,
++}
++
++#[derive(Deserialize)]
++struct ArchiveMetadata {
++    content_item_kinds: Option<Vec<String>>,
++}
++
++#[derive(Deserialize)]
++struct ArchiveText {
++    #[serde(rename = "type")]
++    kind: String,
++    text: Option<String>,
++}
++
++fn export_originals(
++    source: &std::path::Path,
++    sid: &str,
++    path: &std::path::Path,
++) -> CodexResult<PathBuf> {
++    let mut records =
++        serde_json::Deserializer::from_reader(BufReader::new(
++            codex_exec_server::open_regular_file_no_follow(source)?,
++        ))
++            .into_iter::<ArchiveRecord>();
++    let header = records
++        .next()
++        .transpose()?
++        .ok_or_else(|| CodexErr::InvalidRequest("Empty transcript".to_string()))?;
++    if header.kind != "session_meta" || header.payload.id.as_deref() != Some(sid) {
++        return Err(CodexErr::InvalidRequest(
++            "Transcript identity mismatch".to_string(),
++        ));
++    }
++    // Never overwrite an existing archive or follow a link in its path.
++    // A failed export can leave an unreferenced partial file, never a checkpoint pointer.
++    let mut file = codex_exec_server::create_new_file_no_follow(path)?;
++    let mut messages = 0;
++    for record in records {
++        let record = record?;
++        if record.kind == "compacted" {
++            file.set_len(0)?;
++            file.seek(SeekFrom::Start(0))?;
++            messages = 0;
++        } else if record.kind == "response_item"
++            && record.payload.kind.as_deref() == Some("message")
++            && matches!(record.payload.role.as_deref(), Some("user" | "assistant"))
++            && record.payload.channel.as_deref() != Some("analysis")
++        {
++            let kinds = record
++                .payload
++                .internal_chat_message_metadata_passthrough
++                .and_then(|m| m.content_item_kinds)
++                .unwrap_or_default();
++            let texts: Vec<_> = record
++                .payload
++                .content
++                .unwrap_or_default()
++                .into_iter()
++                .enumerate()
++                .filter(|(i, _)| {
++                    !kinds.get(*i).is_some_and(|k| {
++                        matches!(k.as_str(), "compaction.summary" | "handoff_compact.notice")
++                            || (record.payload.role.as_deref() == Some("user")
++                                && !k.is_empty()
++                                && k != "unknown"
++                                && !k.starts_with("user."))
++                    })
++                })
++                .map(|(_, c)| c)
++                .filter(|c| matches!(c.kind.as_str(), "input_text" | "output_text"))
++                .filter(|c| {
++                    record.payload.role.as_deref() != Some("user")
++                        || !crate::context::is_contextual_user_fragment(
++                            &codex_protocol::models::ContentItem::InputText {
++                                text: c.text.clone().unwrap_or_default(),
++                            },
++                        )
++                })
++                .filter_map(|c| c.text)
++                .collect();
++            if !texts.is_empty() {
++                serde_json::to_writer(
++                    &mut file,
++                    &serde_json::json!({"id":record.payload.id,"role":record.payload.role,"text":texts}),
++                )?;
++                file.write_all(b"\n")?;
++                messages += 1;
++            }
++        }
++    }
++    if messages == 0 {
++        return Err(CodexErr::InvalidRequest(
++            "No visible dialogue after the last checkpoint".to_string(),
++        ));
++    }
++    file.sync_all()?;
++    Ok(path.to_path_buf())
++}
++
++#[cfg(test)]
++#[path = "handoff_compact_tests.rs"]
++mod tests;
+diff --git a/codex-rs/core/src/handoff_compact_tests.rs b/codex-rs/core/src/handoff_compact_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..d74a7f06092be2dc414bd54c8415a02b04d03f5a
+--- /dev/null
++++ b/codex-rs/core/src/handoff_compact_tests.rs
+@@ -0,0 +1,43 @@
++// Copyright 2026 Ubadream
++// SPDX-License-Identifier: Apache-2.0
++
++use super::*;
++use pretty_assertions::assert_eq;
++use serde_json::json;
++
++#[test]
++fn archive_exports_only_current_segment_and_rejects_wrong_session() {
++    let dir = tempfile::tempdir().unwrap();
++    let source = dir.path().join("rollout.jsonl");
++    let target = dir.path().join("originals.jsonl");
++    let records = [
++        json!({"type":"session_meta","payload":{"id":"same-session"}}),
++        json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"old words"}]}}),
++        json!({"type":"compacted","payload":{"message":"old summary","replacement_history":[]}}),
++        json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"injected host context"}],"internal_chat_message_metadata_passthrough":{"content_item_kinds":["context.host"]}}}),
++        json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<handoff_compact_history>old pointer</handoff_compact_history>"}]}}),
++        json!({"type":"response_item","payload":{"type":"function_call_output","output":"x".repeat(1024*1024)}}),
++        json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Current\n  literal words"},{"type":"input_image","image_url":"base64-do-not-export"}]}}),
++        json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Final response"}]}}),
++    ];
++    std::fs::write(
++        &source,
++        records.iter().map(|r| format!("{r}\n")).collect::<String>(),
++    )
++    .unwrap();
++    assert!(export_originals(&source, "wrong-session", &target).is_err());
++    assert!(!target.exists());
++    export_originals(&source, "same-session", &target).unwrap();
++    let rows: Vec<serde_json::Value> = std::fs::read_to_string(&target)
++        .unwrap()
++        .lines()
++        .map(|l| serde_json::from_str(l).unwrap())
++        .collect();
++    assert_eq!(
++        rows,
++        vec![
++            json!({"id":null,"role":"user","text":["Current\n  literal words"]}),
++            json!({"id":null,"role":"assistant","text":["Final response"]})
++        ]
++    );
++}
+diff --git a/codex-rs/core/src/hook_runtime.rs b/codex-rs/core/src/hook_runtime.rs
+index 30c4162ffc06307dc0a73189cb4b7944b6a949c2..63c0a5d0fda9e71180a396be2d7f5262bada990f 100644
+--- a/codex-rs/core/src/hook_runtime.rs
++++ b/codex-rs/core/src/hook_runtime.rs
+@@ -306,6 +306,7 @@ pub(crate) async fn run_post_tool_use_hooks(
+     let turn_context = &step_context.turn;
+     let request = PostToolUseRequest {
+         session_id: sess.session_id().into(),
++        context_checkpoint_reminders_native: turn_context.config.context_checkpoint_reminders,
+         turn_id: turn_context.sub_id.clone(),
+         subagent: thread_spawn_subagent_hook_context(sess, turn_context),
+         cwd: tool_hook_cwd(&step_context.environments, turn_context),
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index 2595ce5bb9d08697234127c40ab46eabbee44adb..a580f36fca8f2c786ce642d2bedbb5a70510cc6d 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -36,6 +36,8 @@ mod compact_remote_history;
+ mod compact_remote_v2;
+ mod compact_token_budget;
+ mod thread_startup_metadata;
++mod handoff_compact;
++mod handoff_binding;
+ pub use codex_network_proxy::EnvironmentNetworkPolicy;
+ pub use codex_network_proxy::NetworkDomainPermission;
+ pub use codex_network_proxy::NetworkDomainPermissionEntry;
+diff --git a/codex-rs/core/src/session/checkpoint_reminder.rs b/codex-rs/core/src/session/checkpoint_reminder.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..b08b5289c988e7025fe84671842baa9411f586ee
+--- /dev/null
++++ b/codex-rs/core/src/session/checkpoint_reminder.rs
+@@ -0,0 +1,84 @@
++// Copyright 2026 Ubadream
++// SPDX-License-Identifier: Apache-2.0
++
++use super::session::Session;
++use super::turn_context::TurnContext;
++use crate::context::CheckpointReminder;
++use crate::context::ContextualUserFragment;
++use codex_protocol::models::ContentItem;
++use codex_protocol::models::ResponseItem;
++use codex_protocol::protocol::SessionSource;
++
++/// Append at most one reminder per stage in this thread's active context window.
++/// History carries delivery across resume; compaction changes the window identity.
++pub(super) async fn maybe_record(sess: &Session, turn: &TurnContext) -> bool {
++    if !turn.config.context_checkpoint_reminders
++        || matches!(
++            turn.session_source,
++            SessionSource::SubAgent(_) | SessionSource::Internal(_)
++        )
++    {
++        return false;
++    }
++    // A final response with compaction already scheduled needs no extra model request.
++    let turn_state = {
++        let active = sess.active_turn.lock().await;
++        active
++            .as_ref()
++            .map(|active| std::sync::Arc::clone(&active.turn_state))
++    };
++    if let Some(state) = turn_state
++        && state.lock().await.handoff_compact.is_some()
++    {
++        return false;
++    }
++    let used = sess.get_total_token_usage().await;
++    let prepare_threshold = turn.config.context_checkpoint_prepare_tokens;
++    let compact_threshold = turn.config.context_checkpoint_compact_tokens;
++    let review_threshold = turn.config.context_checkpoint_review_tokens;
++    let thresholds = [
++        Some(compact_threshold),
++        Some(prepare_threshold),
++        review_threshold,
++    ];
++    let Some(threshold) = thresholds
++        .into_iter()
++        .flatten()
++        .find(|threshold| used >= *threshold)
++    else {
++        return false;
++    };
++    let window_id = sess
++        .state
++        .lock()
++        .await
++        .auto_compact_window_ids()
++        .window_id
++        .to_string();
++    let history = sess.clone_history().await;
++    if history.raw_items().any(|item| {
++        matches!(item, ResponseItem::Message { role, content, .. }
++        if role == "developer" && content.iter().any(|content| {
++            matches!(content, ContentItem::InputText { text }
++                if CheckpointReminder::matches_text(text)
++                    && thresholds.into_iter().flatten().any(|delivered_threshold| {
++                        delivered_threshold >= threshold && text.contains(
++                            &format!("window_id={window_id}; threshold={delivered_threshold}\n")
++                        )
++                    }))
++        }))
++    }) {
++        return false;
++    }
++    let item = ContextualUserFragment::into(CheckpointReminder {
++        window_id,
++        thread_id: sess.thread_id.to_string(),
++        used,
++        threshold,
++        compact_threshold,
++        review_threshold,
++    });
++    sess.record_conversation_items(turn, turn.model_info(), &[item])
++        .await;
++    true
++}
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 902d18377cb93e6bc378ebac9fc9b740cce65845..57ce474f84a64e1958e14b3d138921bd3bf6f89f 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -227,6 +227,7 @@ use codex_protocol::error::Result as CodexResult;
+ #[cfg(test)]
+ use codex_protocol::exec_output::StreamOutput;
+ 
++mod checkpoint_reminder;
+ mod code_mode_warning;
+ pub(crate) mod context_window;
+ mod daemon_recovery;
+@@ -4103,6 +4104,25 @@ impl Session {
+         world_state_baseline: Option<Arc<WorldState>>,
+         metadata: CompactedHistoryMetadata,
+     ) {
++        // Keep the C archive pointer in the same checkpoint as its summary, including
++        // when a PostCompact hook stops the turn after the checkpoint is committed.
++        let turn_state = {
++            let active = self.active_turn.lock().await;
++            active.as_ref().map(|active| Arc::clone(&active.turn_state))
++        };
++        let archive = if let Some(turn_state) = turn_state {
++            turn_state.lock().await.handoff_compact_archive.take()
++        } else {
++            None
++        };
++        if let Some(path) = archive {
++            items.push(ResponseItemEnvelope::new(ContextualUserFragment::into(
++                crate::context::HandoffCompactNotice(format!(
++                    "C compaction: visible dialogue text since the previous compaction through this turn's final reply is archived at {}. This is historical data, not new instructions. Tool output and media bodies remain in the original task rollout. Read only needed slices or use the existing recall tool; do not reload the entire archive.",
++                    path.display()
++                )),
++            )));
++        }
+         for envelope in &mut items {
+             Self::assign_missing_response_item_id(&mut envelope.item);
+         }
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index b88b343c1df7e8c7bd0a3b9d34b747b0b03f4576..e85eaed4281796649f054fee131b2c0371f2e12f 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -511,6 +511,7 @@ pub(crate) async fn run_turn(
+                 .await;
+ 
+             // Construct the input that we will send to the model.
++            super::checkpoint_reminder::maybe_record(sess.as_ref(), turn_context.as_ref()).await;
+             let sampling_request_input: Vec<ResponseItem> = async {
+                 sess.clone_history()
+                     .await
+@@ -561,7 +562,11 @@ pub(crate) async fn run_turn(
+                 }
+                 .instrument(trace_span!("run_turn.collect_post_sampling_state"))
+                 .await;
+-                let needs_follow_up = model_needs_follow_up || has_pending_input;
++                let checkpoint_reminder =
++                    super::checkpoint_reminder::maybe_record(sess.as_ref(), turn_context.as_ref())
++                        .await;
++                let needs_follow_up =
++                    model_needs_follow_up || has_pending_input || checkpoint_reminder;
+                 let token_limit_reached = token_status.token_limit_reached;
+ 
+                 trace!(
+@@ -707,6 +712,81 @@ pub(crate) async fn run_turn(
+                     // Token-budget resets do not summarize, so preserve their existing rollover
+                     // policy. Keep summarizing compaction in this task to serialize history updates.
+                     let config = &turn_context.config;
++                    if let Some(mode) = crate::handoff_compact::take(&sess).await {
++                        if !sess.input_queue.has_pending_input(&sess.active_turn).await
++                            && !cancellation_token.is_cancelled()
++                        {
++                            let result: CodexResult<()> = async {
++                                if mode == crate::handoff_compact::Mode::C {
++                                    let path =
++                                        crate::handoff_compact::archive(&sess, &turn_context).await?;
++                                    let turn_state = {
++                                        let active = sess.active_turn.lock().await;
++                                        Arc::clone(
++                                            &active
++                                                .as_ref()
++                                                .ok_or(CodexErr::TurnAborted)?
++                                                .turn_state,
++                                        )
++                                    };
++                                    turn_state.lock().await.handoff_compact_archive = Some(path);
++                                }
++                                run_auto_compact(
++                                    &sess,
++                                    Arc::clone(&step_context),
++                                    /*fallback_step_context*/ None,
++                                    &mut client_session,
++                                    InitialContextInjection::DoNotInject,
++                                    CompactionReason::UserRequested,
++                                    CompactionPhase::PostTurn,
++                                )
++                                .await?;
++                                sess.flush_rollout().await?;
++                                Ok(())
++                            }
++                            .await;
++                            let compact_succeeded = result.is_ok();
++                            if let Err(err) = result {
++                                if matches!(
++                                    err.details(),
++                                    CodexErrorDetails::Interrupted | CodexErrorDetails::TurnAborted
++                                ) {
++                                    return Err(err);
++                                }
++                                sess.send_event(&turn_context, EventMsg::Warning(WarningEvent {
++                                    message: format!("handoff_compact {mode:?} did not complete: {err}. No mode fallback was performed."),
++                                })).await;
++                            }
++                            if compact_succeeded {
++                                let turn_state = {
++                                    let active = sess.active_turn.lock().await;
++                                    active.as_ref().map(|active| Arc::clone(&active.turn_state))
++                                };
++                                let resume = if let Some(state) = turn_state {
++                                    std::mem::take(&mut state.lock().await.handoff_binding_resume)
++                                } else {
++                                    false
++                                };
++                                if resume
++                                    && !cancellation_token.is_cancelled()
++                                    && !sess.input_queue.has_pending_input(&sess.active_turn).await
++                                {
++                                    // Post-turn continuation stays in this loop, bypassing the
++                                    // normal turn-start drain. Run compact hooks before sampling.
++                                    if run_pending_session_start_hooks(&sess, &turn_context).await {
++                                        return Ok(None);
++                                    }
++                                    can_drain_pending_input = true;
++                                    continue;
++                                }
++                            }
++                        } else {
++                            sess.send_event(&turn_context, EventMsg::Warning(WarningEvent {
++                                message: "handoff_compact cancelled because new input or cancellation arrived.".to_string(),
++                            })).await;
++                        }
++                        break;
++                    }
+                     if config.model_post_turn_compact_threshold_percent > 0
+                         && !config.features.enabled(Feature::TokenBudget)
+                         && super::context_window::context_window_token_status(
+diff --git a/codex-rs/core/src/state/turn.rs b/codex-rs/core/src/state/turn.rs
+index 334372019fb52e9e8ac22a9fe8622a223149c5d5..654e65d34c427f0fb460dfc627e66c148aa2bf8b 100644
+--- a/codex-rs/core/src/state/turn.rs
++++ b/codex-rs/core/src/state/turn.rs
+@@ -87,6 +87,9 @@ pub(crate) struct RunningTask {
+ /// Mutable state for a single turn.
+ #[derive(Default)]
+ pub(crate) struct TurnState {
++    pub(crate) handoff_compact: Option<crate::handoff_compact::Mode>,
++    pub(crate) handoff_compact_archive: Option<std::path::PathBuf>,
++    pub(crate) handoff_binding_resume: bool,
+     pending_approvals: HashMap<String, oneshot::Sender<ReviewDecision>>,
+     pending_request_permissions: HashMap<String, PendingRequestPermissions>,
+     pending_user_input: HashMap<String, oneshot::Sender<AcceptedUserInputResponse>>,
+diff --git a/codex-rs/core/src/tools/handlers/handoff_compact.rs b/codex-rs/core/src/tools/handlers/handoff_compact.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..6f36aa64cdf71103dbd8645d9806f3af280bccd8
+--- /dev/null
++++ b/codex-rs/core/src/tools/handlers/handoff_compact.rs
+@@ -0,0 +1,200 @@
++// Copyright 2026 Ubadream
++// SPDX-License-Identifier: Apache-2.0
++
++use codex_exec_server::GetMetadataOptions;
++use codex_tools::JsonSchema;
++use codex_tools::ResponsesApiTool;
++use codex_tools::ToolName;
++use codex_tools::ToolSpec;
++use crate::function_tool::FunctionCallError;
++use crate::handoff_compact::Mode;
++use crate::tools::context::FunctionToolOutput;
++use crate::tools::context::ToolInvocation;
++use crate::tools::context::ToolPayload;
++use crate::tools::context::boxed_tool_output;
++use crate::tools::registry::CoreToolRuntime;
++use crate::tools::registry::ToolExecutor;
++use futures::StreamExt;
++use serde::Deserialize;
++use serde_json::json;
++use std::collections::BTreeMap;
++
++pub struct HandoffCompactHandler;
++
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Arguments {
++    mode: Mode,
++    reason: String,
++    handoff_path: Option<String>,
++    environment_id: Option<String>,
++    continuation: Option<crate::handoff_binding::Continuation>,
++}
++
++impl ToolExecutor<ToolInvocation> for HandoffCompactHandler {
++    fn tool_name(&self) -> ToolName {
++        ToolName::plain("handoff_compact")
++    }
++
++    fn spec(&self) -> ToolSpec {
++        ToolSpec::Function(ResponsesApiTool {
++            name: "handoff_compact".to_string(),
++            description: "Prepared handoffs, request binding, and automatic handoff continuation are disabled in this build; do not call prepare. A schedules native summarization after the final response. C also saves a local plaintext archive of visible dialogue text since the previous checkpoint. cancel cancels this turn's scheduled compaction. New input or cancellation cancels the schedule. Existing hooks still apply. A/C scheduling receipts are not completion; completion is reported by the contextCompaction event.".to_string(),
++            strict: false,
++            defer_loading: None,
++            parameters: JsonSchema::object(BTreeMap::from([
++                ("mode".to_string(), JsonSchema::string_enum(vec![json!("prepare"), json!("A"), json!("C"), json!("cancel")], None)),
++                ("reason".to_string(), JsonSchema::string(Some("Brief reason (1..500 characters).".to_string()))),
++                ("handoff_path".to_string(), JsonSchema::string(Some("For prepare: a read-back UTF-8 handoff, at most 32 KiB. Absolute or relative to the selected environment's working directory.".to_string()))),
++                ("environment_id".to_string(), JsonSchema::string(Some("For prepare: selected execution environment; omitted uses the primary environment. Existing filesystem permissions are enforced without escalation.".to_string()))),
++                ("continuation".to_string(), JsonSchema::string_enum(vec![json!("continue"), json!("wait")], Some("For prepare: continue only unfinished authorized work; wait if complete or awaiting a decision.".to_string()))),
++            ]), Some(vec!["mode".to_string(), "reason".to_string()]), Some(false.into())),
++            output_schema: None,
++        })
++    }
++
++    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
++    where
++        ToolInvocation: 'a,
++    {
++        Box::pin(async move {
++            let ToolPayload::Function { arguments } = invocation.payload else {
++                return Err(FunctionCallError::RespondToModel(
++                    "Expected function arguments".to_string(),
++                ));
++            };
++            let args: Arguments = super::parse_arguments(&arguments)?;
++            if args.reason.trim().is_empty() || args.reason.chars().count() > 500 {
++                return Err(FunctionCallError::RespondToModel(
++                    "reason must contain 1..500 characters".to_string(),
++                ));
++            }
++            let turn_state = {
++                let active = invocation.session.active_turn.lock().await;
++                let active = active.as_ref().ok_or_else(|| {
++                    FunctionCallError::RespondToModel("No active turn".to_string())
++                })?;
++                if invocation.cancellation_token.is_cancelled()
++                    || active
++                        .task
++                        .as_ref()
++                        .is_none_or(|task| task.turn_context.sub_id != invocation.turn.sub_id)
++                {
++                    return Err(FunctionCallError::RespondToModel(
++                        "The requesting turn is no longer active".to_string(),
++                    ));
++                }
++                std::sync::Arc::clone(&active.turn_state)
++            };
++            if args.mode == Mode::Prepare {
++                // Fail before reading the selected source or touching runtime storage.
++                crate::handoff_binding::ensure_storage_available().map_err(|error| {
++                    FunctionCallError::RespondToModel(error.to_string())
++                })?;
++                let path = args.handoff_path.ok_or_else(|| {
++                    FunctionCallError::RespondToModel("prepare requires handoff_path".to_string())
++                })?;
++                let continuation = args.continuation.ok_or_else(|| {
++                    FunctionCallError::RespondToModel("prepare requires continuation".to_string())
++                })?;
++                let environment = super::resolve_tool_environment(
++                    &invocation.step_context.environments,
++                    args.environment_id.as_deref(),
++                )?
++                .ok_or_else(|| {
++                    FunctionCallError::RespondToModel(
++                        "handoff prepare requires an execution environment".to_string(),
++                    )
++                })?;
++                // Resolve paths using the executor's path convention, never the host OS.
++                let path_uri = environment.cwd().join(&path).map_err(|error| {
++                    FunctionCallError::RespondToModel(format!(
++                        "unable to resolve handoff path: {error}"
++                    ))
++                })?;
++                let sandbox = environment.sandbox_context(/*additional_permissions*/ None);
++                let fs = environment.environment.get_filesystem();
++                let metadata = fs
++                    .get_metadata(&path_uri, GetMetadataOptions::default(), Some(&sandbox))
++                    .await
++                    .map_err(|error| {
++                        FunctionCallError::RespondToModel(format!(
++                            "unable to locate handoff through filesystem policy: {error}"
++                        ))
++                    })?;
++                if !metadata.is_file || metadata.size > crate::handoff_binding::MAX_HANDOFF_BYTES {
++                    return Err(FunctionCallError::RespondToModel(
++                        "handoff must be a regular file of at most 32 KiB".to_string(),
++                    ));
++                }
++                // Streaming keeps the accumulated text bounded even if the source grows
++                // after metadata inspection. The executor bounds each delivered chunk.
++                let mut stream = fs
++                    .read_file_stream(&path_uri, Some(&sandbox))
++                    .await
++                    .map_err(|error| {
++                        FunctionCallError::RespondToModel(format!(
++                            "unable to read handoff through filesystem policy: {error}"
++                        ))
++                    })?;
++                let mut bytes = Vec::new();
++                while let Some(chunk) = stream.next().await {
++                    if invocation.cancellation_token.is_cancelled() {
++                        return Err(FunctionCallError::RespondToModel(
++                            "handoff read cancelled".to_string(),
++                        ));
++                    }
++                    let chunk = chunk.map_err(|error| {
++                        FunctionCallError::RespondToModel(format!(
++                            "unable to stream handoff through filesystem policy: {error}"
++                        ))
++                    })?;
++                    if chunk.len() > (crate::handoff_binding::MAX_HANDOFF_BYTES as usize)
++                        .saturating_sub(bytes.len())
++                    {
++                        return Err(FunctionCallError::RespondToModel(
++                            "handoff exceeds 32 KiB".to_string(),
++                        ));
++                    }
++                    bytes.extend_from_slice(&chunk);
++                }
++                let text = String::from_utf8(bytes).map_err(|error| {
++                    FunctionCallError::RespondToModel(format!(
++                        "handoff is not valid UTF-8: {error}"
++                    ))
++                })?;
++                let binding = crate::handoff_binding::prepare(
++                    &invocation.session,
++                    &invocation.turn,
++                    &text,
++                    continuation,
++                )
++                .await
++                .map_err(|e| FunctionCallError::RespondToModel(format!("Handoff was not bound: {e}")))?;
++                return Ok(boxed_tool_output(FunctionToolOutput::from_text(
++                    json!({"prepared": binding, "compaction_started": false}).to_string(),
++                    Some(true),
++                )));
++            }
++            if args.handoff_path.is_some()
++                || args.continuation.is_some()
++                || args.environment_id.is_some()
++            {
++                return Err(FunctionCallError::RespondToModel(
++                    "handoff_path, environment_id and continuation are only valid for prepare".to_string(),
++                ));
++            }
++            let mut state = turn_state.lock().await;
++            state.handoff_compact = match args.mode {
++                Mode::Cancel => None,
++                mode => Some(mode),
++            };
++            Ok(boxed_tool_output(FunctionToolOutput::from_text(
++                json!({"scheduled": state.handoff_compact, "compaction_started": false, "turn_id": invocation.turn.sub_id}).to_string(),
++                Some(true),
++            )))
++        })
++    }
++}
++
++impl CoreToolRuntime for HandoffCompactHandler {}
+diff --git a/codex-rs/core/src/tools/handlers/mod.rs b/codex-rs/core/src/tools/handlers/mod.rs
+index 2d0b6177e10efec4f4352acf9875b4d9e91382b2..27da0c54f6cbcff1a9efeec1b84c3a380d124f79 100644
+--- a/codex-rs/core/src/tools/handlers/mod.rs
++++ b/codex-rs/core/src/tools/handlers/mod.rs
+@@ -35,6 +35,7 @@ pub(crate) mod unified_exec;
+ mod view_image;
+ pub(crate) mod view_image_spec;
+ mod wait_for_environment;
++mod handoff_compact;
+ 
+ use codex_file_system::FileSystemSandboxContext;
+ use codex_sandboxing::policy_transforms::materialize_additional_permissions_with_context;
+@@ -82,6 +83,7 @@ pub use unified_exec::WriteStdinHandler;
+ pub use view_image::ViewImageHandler;
+ pub(crate) use wait_for_environment::WaitForEnvironmentHandler;
+ pub use wait_for_environment::WaitForEnvironmentToolConfig;
++pub use handoff_compact::HandoffCompactHandler;
+ 
+ pub(crate) fn parse_arguments<T>(arguments: &str) -> Result<T, FunctionCallError>
+ where
+diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
+index bb1474feb52820424f14089c0b073df7b9d650a1..383b0f4bc6de98813b0b58a3a846c4dc086303b4 100644
+--- a/codex-rs/core/src/tools/spec_plan.rs
++++ b/codex-rs/core/src/tools/spec_plan.rs
+@@ -1153,6 +1153,9 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+     if turn_context.config.update_plan_enabled {
+         registry.add(PlanHandler);
+     }
++    if !turn_context.session_source.is_non_root_agent() && !features.enabled(Feature::TokenBudget) {
++        registry.add(crate::tools::handlers::HandoffCompactHandler);
++    }
+ 
+     if features.enabled(Feature::DeferredExecutor) {
+         registry.add(
+diff --git a/codex-rs/core/tests/suite/checkpoint_reminder.rs b/codex-rs/core/tests/suite/checkpoint_reminder.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..a4acd699c3adac31253029753ee74c42d21e7c47
+--- /dev/null
++++ b/codex-rs/core/tests/suite/checkpoint_reminder.rs
+@@ -0,0 +1,301 @@
++// Copyright 2026 Ubadream
++// SPDX-License-Identifier: Apache-2.0
++
++use anyhow::Result;
++use codex_protocol::protocol::EventMsg;
++use codex_protocol::protocol::Op;
++use core_test_support::responses::ev_assistant_message;
++use core_test_support::responses::ev_completed_with_tokens;
++use core_test_support::responses::sse;
++use core_test_support::responses::{self};
++use core_test_support::test_codex::test_codex;
++use core_test_support::wait_for_event;
++use pretty_assertions::assert_eq;
++
++fn reply(id: &str, used: i64) -> String {
++    sse(vec![
++        ev_assistant_message(id, "done"),
++        ev_completed_with_tokens(id, used),
++    ])
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn checkpoint_reminder_custom_thresholds_replace_old_stages_and_survive_resume() -> Result<()>
++{
++    let server = responses::start_mock_server().await;
++    let mock = responses::mount_sse_sequence(
++        &server,
++        vec![
++            reply("below-new-review", 260_000),
++            reply("review", 265_000),
++            reply("review-ack", 265_000),
++            reply("prepare", 350_000),
++            reply("prepare-ack", 350_000),
++            reply("compact", 430_000),
++            reply("compact-ack", 265_000),
++            reply("resumed", 265_000),
++        ],
++    )
++    .await;
++    let configure = |c: &mut codex_core::config::Config| {
++        c.context_checkpoint_reminders = true;
++        c.context_checkpoint_review_tokens = Some(265_000);
++        c.context_checkpoint_prepare_tokens = 350_000;
++        c.context_checkpoint_compact_tokens = 430_000;
++        c.model_context_window = Some(500_000);
++        c.model_auto_compact_token_limit = Some(450_000);
++    };
++    // The default fixture's max_context_window is below these checkpoints.
++    // Keep the production max-window clamp; give this test a large-window model.
++    let test = test_codex()
++        .with_config(configure)
++        .with_model_info_override("test-gpt-5.1-codex", |model| {
++            model.max_context_window = Some(500_000);
++        })
++        .build_with_auto_env(&server)
++        .await?;
++    test.submit_turn("below new stages").await?;
++    test.submit_turn("review").await?;
++    test.submit_turn("prepare").await?;
++    test.submit_turn("compact").await?;
++    let path = test.codex.rollout_path().expect("rollout");
++    let home = test.home.clone();
++    test.codex.shutdown_and_wait().await?;
++    let resumed = test_codex()
++        .with_config(configure)
++        .with_model_info_override("test-gpt-5.1-codex", |model| {
++            model.max_context_window = Some(500_000);
++        })
++        .resume(&server, home, path)
++        .await?;
++    resumed.submit_turn("resume").await?;
++    let requests = mock.requests();
++    assert_eq!(
++        requests.len(),
++        8,
++        "delivered checkpoints by request: {:?}",
++        requests
++            .iter()
++            .map(|request| {
++                [265_000, 350_000, 430_000]
++                    .map(|threshold| request.body_contains_text(&format!("threshold={threshold}")))
++            })
++            .collect::<Vec<_>>()
++    );
++    assert!(!requests[1].body_contains_text("<context_checkpoint_reminder>"));
++    assert!(requests[2].body_contains_text("threshold=265000"));
++    assert!(requests[2].body_contains_text("Review task completion"));
++    assert!(requests[2].body_contains_text("are not complete"));
++    assert!(requests[2].body_contains_text("Follow the handoff steps only"));
++    assert!(requests[4].body_contains_text("threshold=350000"));
++    assert!(requests[4].body_contains_text("exceed 430000 tokens"));
++    assert!(requests[6].body_contains_text("threshold=430000"));
++    assert!(requests[6].body_contains_text("Reached 430000 tokens"));
++    let last = requests[7].body_json().to_string();
++    assert_eq!(last.matches("<context_checkpoint_reminder>").count(), 3);
++    assert!(!last.contains("threshold=240000"));
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn checkpoint_reminder_custom_jump_does_not_send_lower_stage() -> Result<()> {
++    let server = responses::start_mock_server().await;
++    let mock = responses::mount_sse_sequence(
++        &server,
++        vec![
++            reply("jump", 430_000),
++            reply("ack", 265_000),
++            reply("next", 265_000),
++        ],
++    )
++    .await;
++    let test = test_codex()
++        .with_config(|c| {
++            c.context_checkpoint_reminders = true;
++            c.context_checkpoint_review_tokens = Some(265_000);
++            c.context_checkpoint_prepare_tokens = 350_000;
++            c.context_checkpoint_compact_tokens = 430_000;
++            c.model_context_window = Some(500_000);
++            c.model_auto_compact_token_limit = Some(450_000);
++        })
++        .with_model_info_override("test-gpt-5.1-codex", |model| {
++            model.max_context_window = Some(500_000);
++        })
++        .build_with_auto_env(&server)
++        .await?;
++    test.submit_turn("jump").await?;
++    test.submit_turn("next").await?;
++    let requests = mock.requests();
++    assert_eq!(requests.len(), 3);
++    assert!(requests[1].body_contains_text("threshold=430000"));
++    assert!(!requests[2].body_contains_text("threshold=350000"));
++    assert!(!requests[2].body_contains_text("threshold=265000"));
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn checkpoint_reminder_without_tools_escalates_once_and_survives_resume() -> Result<()> {
++    let server = responses::start_mock_server().await;
++    let mock = responses::mount_sse_sequence(
++        &server,
++        vec![
++            reply("prepare", 240_000),
++            reply("prepare-ack", 240_000),
++            reply("compact", 265_000),
++            reply("compact-ack", 240_000),
++            reply("resumed", 240_000),
++        ],
++    )
++    .await;
++    let test = test_codex()
++        .with_config(|c| {
++            c.context_checkpoint_reminders = true;
++            c.model_context_window = Some(372_000);
++            c.model_auto_compact_token_limit = Some(330_000);
++        })
++        .build_with_auto_env(&server)
++        .await?;
++    test.submit_turn("first").await?;
++    test.submit_turn("second").await?;
++    let path = test.codex.rollout_path().expect("rollout");
++    let home = test.home.clone();
++    test.codex.shutdown_and_wait().await?;
++    let resumed = test_codex()
++        .with_config(|c| {
++            c.context_checkpoint_reminders = true;
++            c.model_context_window = Some(372_000);
++            c.model_auto_compact_token_limit = Some(330_000);
++        })
++        .resume(&server, home, path)
++        .await?;
++    resumed.submit_turn("third").await?;
++    let requests = mock.requests();
++    assert_eq!(requests.len(), 5);
++    assert!(!requests[0].body_contains_text("<context_checkpoint_reminder>"));
++    assert!(requests[1].body_contains_text("threshold=240000"));
++    assert!(requests[3].body_contains_text("threshold=265000"));
++    let last = requests[4].body_json().to_string();
++    assert_eq!(last.matches("<context_checkpoint_reminder>").count(), 2);
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn checkpoint_reminder_jump_to_urgent_does_not_then_send_prepare() -> Result<()> {
++    let server = responses::start_mock_server().await;
++    let mock = responses::mount_sse_sequence(
++        &server,
++        vec![
++            reply("jump", 265_000),
++            reply("ack", 240_000),
++            reply("next", 240_000),
++        ],
++    )
++    .await;
++    let test = test_codex()
++        .with_config(|c| {
++            c.context_checkpoint_reminders = true;
++            c.model_context_window = Some(372_000);
++            c.model_auto_compact_token_limit = Some(330_000);
++        })
++        .build_with_auto_env(&server)
++        .await?;
++    test.submit_turn("first").await?;
++    test.submit_turn("next").await?;
++    let requests = mock.requests();
++    assert_eq!(requests.len(), 3);
++    assert!(requests[1].body_contains_text("threshold=265000"));
++    assert!(!requests[2].body_contains_text("threshold=240000"));
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn checkpoint_reminder_rearms_after_real_compaction() -> Result<()> {
++    let server = responses::start_mock_server().await;
++    let mock = responses::mount_sse_sequence(
++        &server,
++        vec![
++            reply("prepare", 240_000),
++            reply("ack", 240_000),
++            reply("summary", 100),
++            reply("after", 240_000),
++            reply("after-ack", 240_000),
++        ],
++    )
++    .await;
++    let test = test_codex()
++        .with_config(|c| {
++            c.context_checkpoint_reminders = true;
++            c.model_provider.name = "local compaction test".to_string();
++            c.model_context_window = Some(372_000);
++            c.model_auto_compact_token_limit = Some(330_000);
++        })
++        .build_with_auto_env(&server)
++        .await?;
++    test.submit_turn("first").await?;
++    test.codex.submit(Op::Compact).await?;
++    wait_for_event(&test.codex, |event| {
++        matches!(event, EventMsg::TurnComplete(_))
++    })
++    .await;
++    test.submit_turn("after compact").await?;
++    let requests = mock.requests();
++    assert_eq!(requests.len(), 5);
++    assert!(requests[4].body_contains_text("threshold=240000"));
++    assert_eq!(
++        requests[4]
++            .body_json()
++            .to_string()
++            .matches("<context_checkpoint_reminder>")
++            .count(),
++        1
++    );
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn checkpoint_reminder_disabled_does_not_continue() -> Result<()> {
++    let server = responses::start_mock_server().await;
++    let mock = responses::mount_sse_sequence(&server, vec![reply("done", 265_000)]).await;
++    let test = test_codex()
++        .with_config(|c| {
++            c.context_checkpoint_reminders = false;
++            c.model_context_window = Some(372_000);
++            c.model_auto_compact_token_limit = Some(330_000);
++        })
++        .build_with_auto_env(&server)
++        .await?;
++    test.submit_turn("done").await?;
++    assert_eq!(mock.requests().len(), 1);
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn checkpoint_reminder_before_first_request_after_opt_in_resume() -> Result<()> {
++    let server = responses::start_mock_server().await;
++    let mock =
++        responses::mount_sse_sequence(&server, vec![reply("old", 240_000), reply("new", 240_000)])
++            .await;
++    let test = test_codex()
++        .with_config(|c| {
++            c.model_context_window = Some(372_000);
++            c.model_auto_compact_token_limit = Some(330_000);
++        })
++        .build_with_auto_env(&server)
++        .await?;
++    test.submit_turn("old runtime").await?;
++    let path = test.codex.rollout_path().expect("rollout");
++    let home = test.home.clone();
++    test.codex.shutdown_and_wait().await?;
++    let resumed = test_codex()
++        .with_config(|c| {
++            c.context_checkpoint_reminders = true;
++            c.model_context_window = Some(372_000);
++            c.model_auto_compact_token_limit = Some(330_000);
++        })
++        .resume(&server, home, path)
++        .await?;
++    resumed.submit_turn("new runtime").await?;
++    assert_eq!(mock.requests().len(), 2);
++    assert!(mock.requests()[1].body_contains_text("threshold=240000"));
++    Ok(())
++}
+diff --git a/codex-rs/core/tests/suite/handoff_compact.rs b/codex-rs/core/tests/suite/handoff_compact.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..df33da33feaa26fd7d12c4c8bbbb2feaea4ddc41
+--- /dev/null
++++ b/codex-rs/core/tests/suite/handoff_compact.rs
+@@ -0,0 +1,381 @@
++// Copyright 2026 Ubadream
++// SPDX-License-Identifier: Apache-2.0
++
++use anyhow::Result;
++use core_test_support::responses::ev_assistant_message;
++use core_test_support::responses::ev_completed;
++use core_test_support::responses::ev_function_call;
++use core_test_support::responses::sse;
++use core_test_support::responses::{self};
++use core_test_support::test_codex::test_codex;
++use pretty_assertions::assert_eq;
++use serde_json::json;
++
++fn reply(id: &str, text: &str) -> String {
++    sse(vec![ev_assistant_message(id, text), ev_completed(id)])
++}
++
++fn select(id: &str, mode: &str) -> String {
++    sse(vec![
++        ev_function_call(
++            id,
++            "handoff_compact",
++            &json!({"mode": mode, "reason":"finished work boundary"}).to_string(),
++        ),
++        ev_completed(id),
++    ])
++}
++
++fn prepare(path: &std::path::Path, continuation: &str) -> String {
++    sse(vec![
++        ev_function_call(
++            "prepare",
++            "handoff_compact",
++            &json!({
++                "mode": "prepare", "reason": "save this task's stopping point",
++                "handoff_path": path, "continuation": continuation,
++            })
++            .to_string(),
++        ),
++        ev_completed("prepare"),
++    ])
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++#[ignore = "prepared handoffs are disabled until atomic index publication is implemented"]
++// Local synthetic source fixtures are deliberate; remote selection has dedicated coverage.
++async fn handoff_compact_native_midturn_uses_prepared_handoff() -> Result<()> {
++    let dir = tempfile::tempdir()?;
++    let path = dir.path().join("HANDOFF.md");
++    std::fs::write(&path, "Synthetic task: fix wiring. Changes saved; build next.")?;
++    let server = responses::start_mock_server().await;
++    let high =
++        sse(vec![
++        ev_function_call("prepare", "handoff_compact", &json!({
++            "mode":"prepare", "reason":"ready", "handoff_path":path, "continuation":"continue",
++        }).to_string()),
++        responses::ev_completed_with_tokens("high", 330_000),
++    ]);
++    let mock = responses::mount_sse_sequence(
++        &server,
++        vec![
++            high,
++            reply("summary", "MIDTURN_SUMMARY"),
++            reply("continued", "built"),
++        ],
++    )
++    .await;
++    let test = test_codex()
++        .with_config(|c| {
++            c.model_provider.name = "OpenAI (test)".to_string();
++            c.model_auto_compact_token_limit = Some(200_000);
++        })
++        .build(&server)
++        .await?;
++    test.submit_turn("OLD_MIDTURN_REQUEST").await?;
++    assert_eq!(mock.requests().len(), 3);
++    assert!(!mock.requests()[2].body_contains_text("OLD_MIDTURN_REQUEST"));
++    assert!(mock.requests()[2].body_contains_text("Compaction complete. Handoff for thread"));
++    assert!(mock.requests()[2].body_contains_text("MIDTURN_SUMMARY"));
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++#[ignore = "prepared handoffs are disabled until atomic index publication is implemented"]
++async fn handoff_compact_damaged_snapshot_does_not_replace_history() -> Result<()> {
++    let dir = tempfile::tempdir()?;
++    let path = dir.path().join("HANDOFF.md");
++    std::fs::write(&path, "Synthetic handoff: saved; build pending.")?;
++    let server = responses::start_mock_server().await;
++    let mock = responses::mount_sse_sequence(
++        &server,
++        vec![
++            prepare(&path, "wait"),
++            reply("prepared", "prepared"),
++            reply("summary", "UNSAFE_SUMMARY"),
++            reply("next", "new reply"),
++        ],
++    )
++    .await;
++    let test = test_codex()
++        .with_config(|c| c.model_provider.name = "OpenAI (test)".to_string())
++        .build(&server)
++        .await?;
++    test.submit_turn("REQUEST_MUST_SURVIVE_DAMAGED_HANDOFF")
++        .await?;
++    let entry = std::fs::read_dir(test.codex_home_path().join("handoff-compact/handoffs"))?
++        .next()
++        .unwrap()?;
++    let binding: serde_json::Value =
++        serde_json::from_str(&std::fs::read_to_string(entry.path().join("binding.json"))?)?;
++    std::fs::write(binding["handoff_path"].as_str().unwrap(), "modified")?;
++    test.codex
++        .submit(codex_protocol::protocol::Op::Compact)
++        .await?;
++    core_test_support::wait_for_event(&test.codex, |event| {
++        matches!(event, codex_protocol::protocol::EventMsg::TurnComplete(_))
++    })
++    .await;
++    let rollout = std::fs::read_to_string(test.codex.rollout_path().unwrap())?;
++    assert!(!rollout.lines().any(
++        |line| serde_json::from_str::<serde_json::Value>(line).unwrap()["type"] == "compacted"
++    ));
++    test.submit_turn("check original").await?;
++    assert!(
++        mock.requests()
++            .last()
++            .unwrap()
++            .body_contains_text("REQUEST_MUST_SURVIVE_DAMAGED_HANDOFF")
++    );
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++#[ignore = "prepared handoffs are disabled until atomic index publication is implemented"]
++async fn handoff_compact_bound_handoff_replaces_request_and_continues_once() -> Result<()> {
++    for mode in ["A", "C"] {
++        let dir = tempfile::tempdir()?;
++        let path = dir.path().join("HANDOFF.md");
++        std::fs::write(&path, "Synthetic request: fix wiring. Completed: saved. Next: build.")?;
++        let server = responses::start_mock_server().await;
++        let mock = responses::mount_sse_sequence(
++            &server,
++            vec![
++                prepare(&path, "continue"),
++                select("select", mode),
++                reply("final", "saved; compact now"),
++                reply("summary", "BOUND_SUMMARY"),
++                reply("continued", "build finished"),
++            ],
++        )
++        .await;
++        let test = test_codex()
++            .with_config(|c| c.model_provider.name = "OpenAI (test)".to_string())
++            .build(&server)
++            .await?;
++        test.submit_turn("OLD_REQUEST_DO_NOT_REPLAY_240K").await?;
++        let requests = mock.requests();
++        assert_eq!(
++            requests.len(),
++            5,
++            "continue must sample once after compaction without a new prompt"
++        );
++        assert!(!requests[4].body_contains_text("OLD_REQUEST_DO_NOT_REPLAY_240K"));
++        assert!(requests[4].body_contains_text("BOUND_SUMMARY"));
++        assert!(requests[4].body_contains_text("Read the handoff and continue only unfinished work already authorized by the user"));
++        let rollout = std::fs::read_to_string(test.codex.rollout_path().unwrap())?;
++        let checkpoint = rollout
++            .lines()
++            .map(serde_json::from_str::<serde_json::Value>)
++            .collect::<std::result::Result<Vec<_>, _>>()?
++            .into_iter()
++            .find(|r| r["type"] == "compacted")
++            .unwrap();
++        let replacement = checkpoint["payload"]["replacement_history"].to_string();
++        assert!(!replacement.contains("OLD_REQUEST_DO_NOT_REPLAY_240K"));
++        assert!(replacement.contains("Handoff"));
++        // The original source stays in the append-only rollout.
++        assert!(rollout.contains("OLD_REQUEST_DO_NOT_REPLAY_240K"));
++        let bindings: Vec<_> =
++            std::fs::read_dir(test.codex_home_path().join("handoff-compact/handoffs"))?
++                .collect::<std::io::Result<_>>()?;
++        assert_eq!(bindings.len(), 1);
++        let binding: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
++            bindings[0].path().join("binding.json"),
++        )?)?;
++        assert_eq!(
++            std::fs::read_to_string(binding["handoff_path"].as_str().unwrap())?,
++            std::fs::read_to_string(&path)?
++        );
++        assert!(requests[4].body_contains_text(binding["handoff_path"].as_str().unwrap()));
++    }
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++#[ignore = "prepared handoffs are disabled until atomic index publication is implemented"]
++async fn handoff_compact_handoff_wait_and_new_message_are_not_replayed() -> Result<()> {
++    let dir = tempfile::tempdir()?;
++    let path = dir.path().join("HANDOFF.md");
++    std::fs::write(&path, "Synthetic task complete; waiting for a decision.")?;
++    let server = responses::start_mock_server().await;
++    let mock = responses::mount_sse_sequence(
++        &server,
++        vec![
++            prepare(&path, "wait"),
++            select("select", "A"),
++            reply("final", "waiting"),
++            reply("summary", "WAIT_SUMMARY"),
++            reply("next", "new answer"),
++        ],
++    )
++    .await;
++    let test = test_codex()
++        .with_config(|c| c.model_provider.name = "OpenAI (test)".to_string())
++        .build(&server)
++        .await?;
++    test.submit_turn("OLD_WAIT_REQUEST").await?;
++    assert_eq!(
++        mock.requests().len(),
++        4,
++        "wait must not start work after compaction"
++    );
++    test.submit_turn("NEW_REQUEST_AFTER_COMPACT").await?;
++    let request = &mock.requests()[4];
++    assert!(!request.body_contains_text("OLD_WAIT_REQUEST"));
++    assert!(request.body_contains_text("NEW_REQUEST_AFTER_COMPACT"));
++    assert!(request.body_contains_text("awaiting the user decision"));
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++#[ignore = "prepared handoffs are disabled until atomic index publication is implemented"]
++async fn handoff_compact_stale_binding_preserves_new_request() -> Result<()> {
++    let dir = tempfile::tempdir()?;
++    let path = dir.path().join("HANDOFF.md");
++    std::fs::write(&path, "Synthetic handoff for older work.")?;
++    let server = responses::start_mock_server().await;
++    let mock = responses::mount_sse_sequence(
++        &server,
++        vec![
++            prepare(&path, "continue"),
++            reply("first", "prepared only"),
++            select("select", "A"),
++            reply("final", "new request handled"),
++            reply("summary", "NEW_SUMMARY"),
++            reply("next", "done"),
++        ],
++    )
++    .await;
++    let test = test_codex()
++        .with_config(|c| c.model_provider.name = "OpenAI (test)".to_string())
++        .build(&server)
++        .await?;
++    test.submit_turn("older request").await?;
++    test.submit_turn("NEW_REQUEST_NOT_COVERED_BY_HANDOFF")
++        .await?;
++    assert_eq!(mock.requests().len(), 5);
++    test.submit_turn("check").await?;
++    assert!(mock.requests()[5].body_contains_text("NEW_REQUEST_NOT_COVERED_BY_HANDOFF"));
++    assert!(!mock.requests()[5].body_contains_text("Compaction complete. Handoff for thread"));
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn handoff_compact_c_waits_for_final_and_archives_it() -> Result<()> {
++    let server = responses::start_mock_server().await;
++    let mock = responses::mount_sse_sequence(
++        &server,
++        vec![
++            select("select-c", "C"),
++            reply("final", "Final sentence  preserve whitespace"),
++            reply("summary", "NATIVE_SUMMARY"),
++            reply("next", "continued"),
++        ],
++    )
++    .await;
++    let test = test_codex()
++        .with_config(|config| {
++            config.model_provider.name = "OpenAI (test)".to_string();
++        })
++        .build_with_auto_env(&server)
++        .await?;
++    test.submit_turn("Preserve source\n\nContinue this segment").await?;
++    let files: Vec<_> = std::fs::read_dir(test.codex_home_path().join("handoff-compact/originals"))?
++        .collect::<std::io::Result<_>>()?;
++    assert_eq!(files.len(), 1);
++    let archive = std::fs::read_to_string(files[0].path())?;
++    assert!(archive.contains("Final sentence  preserve whitespace"));
++    assert!(!archive.contains("NATIVE_SUMMARY"));
++    test.submit_turn("next turn").await?;
++    let requests = mock.requests();
++    assert_eq!(requests.len(), 4);
++    assert!(requests[3].body_contains_text("NATIVE_SUMMARY"));
++    let input = requests[3].body_json();
++    let notice = input["input"]
++        .as_array()
++        .unwrap()
++        .iter()
++        .filter_map(|i| i.get("content").and_then(|c| c.as_array()))
++        .flatten()
++        .filter_map(|c| c.get("text").and_then(|s| s.as_str()))
++        .find(|s| s.contains("C compaction:"))
++        .expect("C pointer must reach next request");
++    let path = notice
++        .split("archived at ")
++        .nth(1)
++        .unwrap()
++        .split(". This is historical")
++        .next()
++        .unwrap();
++    assert_eq!(
++        std::fs::canonicalize(path)?,
++        std::fs::canonicalize(files[0].path())?
++    );
++    let rollout = std::fs::read_to_string(test.codex.rollout_path().expect("rollout path"))?;
++    let checkpoint = rollout
++        .lines()
++        .map(serde_json::from_str::<serde_json::Value>)
++        .collect::<std::result::Result<Vec<_>, _>>()?
++        .into_iter()
++        .find(|record| record["type"] == "compacted")
++        .expect("native compaction checkpoint");
++    let replacement = checkpoint["payload"]["replacement_history"].to_string();
++    assert!(
++        replacement.contains("C compaction:"),
++        "archive pointer must be persisted with the summary"
++    );
++    assert!(replacement.contains("NATIVE_SUMMARY"));
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn handoff_compact_cancel_makes_no_summary_request() -> Result<()> {
++    let server = responses::start_mock_server().await;
++    let mock = responses::mount_sse_sequence(
++        &server,
++        vec![
++            select("select-a", "A"),
++            select("cancel", "cancel"),
++            reply("final", "done"),
++            reply("next", "continued"),
++        ],
++    )
++    .await;
++    let test = test_codex().build_with_auto_env(&server).await?;
++    test.submit_turn("keep this literal text").await?;
++    test.submit_turn("next turn").await?;
++    let requests = mock.requests();
++    assert_eq!(requests.len(), 4);
++    assert!(requests[3].body_contains_text("keep this literal text"));
++    assert!(!test.codex_home_path().join("handoff-compact").exists());
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn handoff_compact_a_uses_native_summary_without_archive() -> Result<()> {
++    let server = responses::start_mock_server().await;
++    let mock = responses::mount_sse_sequence(
++        &server,
++        vec![
++            select("select-a", "A"),
++            reply("final", "finished answer"),
++            reply("summary", "NATIVE_A_SUMMARY"),
++            reply("next", "continued"),
++        ],
++    )
++    .await;
++    let test = test_codex()
++        .with_config(|config| {
++            config.model_provider.name = "OpenAI (test)".to_string();
++        })
++        .build_with_auto_env(&server)
++        .await?;
++    test.submit_turn("summarize after answering").await?;
++    test.submit_turn("next turn").await?;
++    let requests = mock.requests();
++    assert_eq!(requests.len(), 4);
++    assert!(requests[3].body_contains_text("NATIVE_A_SUMMARY"));
++    assert!(!test.codex_home_path().join("handoff-compact").exists());
++    Ok(())
++}
+diff --git a/codex-rs/core/tests/suite/handoff_compact_security.rs b/codex-rs/core/tests/suite/handoff_compact_security.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..ddbc8e2f6f9275755df9e68e97379f8dd84c5d4c
+--- /dev/null
++++ b/codex-rs/core/tests/suite/handoff_compact_security.rs
+@@ -0,0 +1,206 @@
++// Copyright 2026 Ubadream
++// SPDX-License-Identifier: Apache-2.0
++
++use anyhow::Context;
++use anyhow::Result;
++use codex_exec_server::LOCAL_ENVIRONMENT_ID;
++use codex_exec_server::REMOTE_ENVIRONMENT_ID;
++use codex_protocol::models::PermissionProfile;
++use codex_protocol::permissions::FileSystemAccessMode;
++use codex_protocol::permissions::FileSystemPath;
++use codex_protocol::permissions::FileSystemSandboxEntry;
++use codex_protocol::permissions::FileSystemSandboxPolicy;
++use codex_protocol::permissions::NetworkSandboxPolicy;
++use codex_protocol::protocol::EnvironmentConfigState;
++use codex_protocol::protocol::TurnEnvironmentSelection;
++use core_test_support::PathExt;
++use core_test_support::responses;
++use core_test_support::responses::ev_assistant_message;
++use core_test_support::responses::ev_completed;
++use core_test_support::responses::ev_function_call;
++use core_test_support::responses::sse;
++use core_test_support::skip_if_no_remote_env;
++use core_test_support::test_codex::local;
++use core_test_support::test_codex::test_codex;
++use pretty_assertions::assert_eq;
++use serde_json::json;
++
++fn prepare_call(arguments: serde_json::Value) -> String {
++    sse(vec![
++        ev_function_call("prepare", "handoff_compact", &arguments.to_string()),
++        ev_completed("prepare"),
++    ])
++}
++
++fn final_response() -> String {
++    sse(vec![
++        ev_assistant_message("done", "done"),
++        ev_completed("done"),
++    ])
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn handoff_prepare_fails_closed_before_source_lookup_or_store_write() -> Result<()> {
++    let server = responses::start_mock_server().await;
++    let test = test_codex().build(&server).await?;
++    let mock = responses::mount_sse_sequence(&server, vec![
++        prepare_call(json!({
++            "mode":"prepare", "reason":"test unavailable store",
++            "handoff_path":"missing-synthetic-handoff.md",
++            "environment_id":"missing-synthetic-environment",
++            "continuation":"wait",
++        })),
++        final_response(),
++    ]).await;
++    test.submit_turn("Prepare the synthetic handoff.").await?;
++    let request = mock.last_request().context("tool result request")?;
++    let output = request.function_call_output_text("prepare").context("tool error")?;
++    assert!(output.contains("disabled pending atomic no-follow"));
++    assert!(!output.contains("\"prepared\""));
++    assert!(!test.codex_home_path().join("handoff-compact").exists());
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++#[ignore = "prepared handoffs are disabled until atomic index publication is implemented"]
++async fn handoff_prepare_rejects_unknown_environment_without_host_fallback() -> Result<()> {
++    let server = responses::start_mock_server().await;
++    let test = test_codex().build(&server).await?;
++    let source = test.config.cwd.join("handoff.md");
++    std::fs::write(&source, "Synthetic source must not be read via host fallback.")?;
++    let mock = responses::mount_sse_sequence(&server, vec![
++        prepare_call(json!({
++            "mode":"prepare", "reason":"test environment boundary",
++            "handoff_path":source, "environment_id":"missing-synthetic-environment",
++            "continuation":"wait",
++        })),
++        final_response(),
++    ]).await;
++    test.submit_turn("Prepare the synthetic handoff.").await?;
++    let request = mock.last_request().context("tool result request")?;
++    let output = request.function_call_output_text("prepare").context("tool error")?;
++    assert!(output.contains("unknown turn environment id"));
++    assert!(!test.codex_home_path().join("handoff-compact/handoffs").exists());
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++#[ignore = "prepared handoffs are disabled until atomic index publication is implemented"]
++async fn handoff_prepare_enforces_denied_synthetic_outside_file() -> Result<()> {
++    let server = responses::start_mock_server().await;
++    let test = test_codex().build(&server).await?;
++    // An owned temporary fixture outside the workspace, never a real private file.
++    let outside = tempfile::tempdir()?;
++    let source = outside.path().join("synthetic-denied-handoff.md");
++    let content = "SYNTHETIC_DENIED_TEXT_MUST_NOT_BE_COPIED";
++    std::fs::write(&source, content)?;
++    let mock = responses::mount_sse_sequence(&server, vec![
++        prepare_call(json!({
++            "mode":"prepare", "reason":"test read denial",
++            "handoff_path":source, "continuation":"wait",
++        })),
++        final_response(),
++    ]).await;
++    let mut policy = FileSystemSandboxPolicy::default();
++    policy.entries.push(FileSystemSandboxEntry {
++        path: FileSystemPath::Path { path: source.abs().into() },
++        access: FileSystemAccessMode::Deny,
++        missing_path_behavior: None,
++    });
++    let permissions = PermissionProfile::from_runtime_permissions(
++        &policy, NetworkSandboxPolicy::Restricted,
++    );
++    test.submit_turn_with_permission_profile("Prepare the synthetic handoff.", permissions).await?;
++    let request = mock.last_request().context("tool result request")?;
++    let output = request.function_call_output_text("prepare").context("tool error")?;
++    assert!(output.contains("through filesystem policy"));
++    assert!(!output.contains(content));
++    assert!(!test.codex_home_path().join("handoff-compact/handoffs").exists());
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++#[ignore = "prepared handoffs are disabled until atomic index publication is implemented"]
++async fn handoff_prepare_resolves_relative_path_in_explicit_local_environment() -> Result<()> {
++    let server = responses::start_mock_server().await;
++    let test = test_codex().build(&server).await?;
++    let content = "Synthetic UTF-8 handoff: café. Next: verify the result.";
++    std::fs::write(test.config.cwd.join("handoff.md"), content)?;
++    let mock = responses::mount_sse_sequence(&server, vec![
++        prepare_call(json!({
++            "mode":"prepare", "reason":"test environment-relative path",
++            "handoff_path":"handoff.md", "environment_id":LOCAL_ENVIRONMENT_ID,
++            "continuation":"wait",
++        })),
++        final_response(),
++    ]).await;
++    test.submit_turn_with_environments("Prepare the synthetic handoff.",
++        Some(vec![local(test.config.cwd.clone())])).await?;
++    let request = mock.last_request().context("tool result request")?;
++    let output = request.function_call_output_text("prepare").context("tool result")?;
++    let result: serde_json::Value = serde_json::from_str(&output)?;
++    let path = result["prepared"]["handoff_path"].as_str().context("snapshot path")?;
++    assert_eq!(std::fs::read_to_string(path)?, content);
++    assert_eq!(result["compaction_started"], false);
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++#[ignore = "prepared handoffs are disabled until atomic index publication is implemented"]
++async fn handoff_prepare_rejects_invalid_or_oversized_source_before_snapshot() -> Result<()> {
++    for content in [vec![0xff, 0xfe], vec![b'x'; 32 * 1024 + 1], vec![b' '; 4]] {
++        let server = responses::start_mock_server().await;
++        let test = test_codex().build(&server).await?;
++        std::fs::write(test.config.cwd.join("handoff.md"), content)?;
++        let mock = responses::mount_sse_sequence(&server, vec![
++            prepare_call(json!({
++                "mode":"prepare", "reason":"test source bounds",
++                "handoff_path":"handoff.md", "continuation":"wait",
++            })),
++            final_response(),
++        ]).await;
++        test.submit_turn("Prepare the synthetic handoff.").await?;
++        let request = mock.last_request().context("tool result request")?;
++        let output = request.function_call_output_text("prepare").context("tool error")?;
++        assert!(!output.contains("\"prepared\""));
++        assert!(!test.codex_home_path().join("handoff-compact/handoffs").exists());
++    }
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++#[ignore = "prepared handoffs are disabled until atomic index publication is implemented"]
++async fn handoff_prepare_reads_selected_remote_environment_instead_of_local_namesake() -> Result<()> {
++    skip_if_no_remote_env!(Ok(()));
++    let server = responses::start_mock_server().await;
++    let test = test_codex().build_with_remote_and_local_env(&server).await?;
++    let local_cwd = tempfile::tempdir()?;
++    std::fs::write(local_cwd.path().join("handoff.md"), "WRONG_LOCAL_SYNTHETIC_HANDOFF")?;
++    let remote_cwd = test.executor_environment().selection().cwd.clone();
++    let remote_path = remote_cwd.join("handoff.md")?;
++    let content = "CORRECT_REMOTE_SYNTHETIC_HANDOFF";
++    test.fs().write_file(&remote_path, content.as_bytes().to_vec(),
++        Default::default(), /*sandbox*/ None).await?;
++    let mock = responses::mount_sse_sequence(&server, vec![
++        prepare_call(json!({
++            "mode":"prepare", "reason":"test remote environment selection",
++            "handoff_path":"handoff.md", "environment_id":REMOTE_ENVIRONMENT_ID,
++            "continuation":"wait",
++        })),
++        final_response(),
++    ]).await;
++    let remote = TurnEnvironmentSelection {
++        environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
++        cwd: remote_cwd.clone(),
++        workspace_roots: vec![remote_cwd],
++        config: EnvironmentConfigState::FromThread,
++    };
++    test.submit_turn_with_environments("Prepare the remote synthetic handoff.",
++        Some(vec![local(local_cwd.path().abs()), remote])).await?;
++    let request = mock.last_request().context("tool result request")?;
++    let output = request.function_call_output_text("prepare").context("tool result")?;
++    let result: serde_json::Value = serde_json::from_str(&output)?;
++    let path = result["prepared"]["handoff_path"].as_str().context("snapshot path")?;
++    assert_eq!(std::fs::read_to_string(path)?, content);
++    Ok(())
++}
+diff --git a/codex-rs/core/tests/suite/mod.rs b/codex-rs/core/tests/suite/mod.rs
+index 54e98b75cc038ab34c2df0744220344d6114b896..bf5460e5f4db021767a1896110dab5e4dccfdc27 100644
+--- a/codex-rs/core/tests/suite/mod.rs
++++ b/codex-rs/core/tests/suite/mod.rs
+@@ -1,4 +1,6 @@
+ // Aggregates all former standalone integration tests as modules.
++mod handoff_compact;
++mod handoff_compact_security;
+ use codex_apply_patch::CODEX_CORE_APPLY_PATCH_ARG1;
+ #[cfg(unix)]
+ use codex_exec_server::CODEX_ARG0_EXEC_HELPER_ARG1;
+@@ -87,6 +89,7 @@ mod guardian_cached_score;
+ mod guardian_checkpoint_migration;
+ // Uses the same command-approval harness as guardian_review below.
+ mod canonical_plugin_connectors;
++mod checkpoint_reminder;
+ mod gateway_auth;
+ #[cfg(not(target_os = "windows"))]
+ mod guardian_context_budget;
+diff --git a/codex-rs/exec-server/src/lib.rs b/codex-rs/exec-server/src/lib.rs
+index 2d850e9539bedfcf55232646c4881c6ebc837ecb..2df15b632f0581649b88b6e3084be7bc0b776f1b 100644
+--- a/codex-rs/exec-server/src/lib.rs
++++ b/codex-rs/exec-server/src/lib.rs
+@@ -24,6 +24,9 @@ mod local_file_system;
+ mod local_process;
+ mod network_policy_decisions;
+ mod no_follow;
++pub use no_follow::create_new_file_no_follow;
++pub use no_follow::open_regular_file_no_follow;
++pub use no_follow::read_bounded_file_no_follow;
+ mod noise_channel;
+ mod noise_relay;
+ mod process;
+diff --git a/codex-rs/exec-server/src/no_follow/bounded_store_tests.rs b/codex-rs/exec-server/src/no_follow/bounded_store_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..c62a3031f4174a9b6803531bb38812b73098e1d1
+--- /dev/null
++++ b/codex-rs/exec-server/src/no_follow/bounded_store_tests.rs
+@@ -0,0 +1,95 @@
++// Copyright 2026 Ubadream
++// SPDX-License-Identifier: Apache-2.0
++
++use super::create_new_file_no_follow;
++use super::read_bounded_file_no_follow;
++use pretty_assertions::assert_eq;
++use std::io::Write;
++
++#[test]
++fn no_follow_store_create_new_and_bounded_utf8_round_trip() -> std::io::Result<()> {
++    let dir = tempfile::tempdir()?;
++    // Canonicalize only this owned test fixture so macOS /var aliases do not
++    // obscure the ancestor-link behavior being tested. Production does not do this.
++    let root = dir.path().canonicalize()?;
++    let path = root.join("snapshot.md");
++    let text = "Synthetic handoff: café";
++    let mut file = create_new_file_no_follow(&path)?;
++    file.write_all(text.as_bytes())?;
++    file.sync_all()?;
++    assert_eq!(read_bounded_file_no_follow(&path, text.len() as u64)?, text);
++    assert!(read_bounded_file_no_follow(&path, text.len() as u64 - 1).is_err());
++    assert!(create_new_file_no_follow(&path).is_err());
++    assert_eq!(std::fs::read_to_string(path)?, text);
++    Ok(())
++}
++
++#[test]
++fn no_follow_store_create_new_rejects_existing_hardlink_without_clobber() -> std::io::Result<()> {
++    let dir = tempfile::tempdir()?;
++    let root = dir.path().canonicalize()?;
++    let original = root.join("original.txt");
++    let candidate = root.join("snapshot.md");
++    std::fs::write(&original, "SYNTHETIC_ORIGINAL")?;
++    std::fs::hard_link(&original, &candidate)?;
++    assert!(create_new_file_no_follow(&candidate).is_err());
++    assert_eq!(std::fs::read_to_string(original)?, "SYNTHETIC_ORIGINAL");
++    assert_eq!(std::fs::read_to_string(candidate)?, "SYNTHETIC_ORIGINAL");
++    Ok(())
++}
++
++#[test]
++fn no_follow_store_rejects_invalid_utf8_and_directories() -> std::io::Result<()> {
++    let dir = tempfile::tempdir()?;
++    let root = dir.path().canonicalize()?;
++    let path = root.join("invalid.md");
++    let mut file = create_new_file_no_follow(&path)?;
++    file.write_all(&[0xff, 0xfe])?;
++    file.sync_all()?;
++    assert!(read_bounded_file_no_follow(&path, 32).is_err());
++    assert!(read_bounded_file_no_follow(&root, 32).is_err());
++    assert!(create_new_file_no_follow(&root).is_err());
++    Ok(())
++}
++
++#[cfg(unix)]
++#[test]
++fn no_follow_store_rejects_final_and_ancestor_symlinks() -> std::io::Result<()> {
++    let dir = tempfile::tempdir()?;
++    let root = dir.path().canonicalize()?;
++    let outside = root.join("outside");
++    std::fs::create_dir(&outside)?;
++    std::fs::write(outside.join("source.md"), "SYNTHETIC_OUTSIDE")?;
++    let final_link = root.join("snapshot.md");
++    std::os::unix::fs::symlink(outside.join("source.md"), &final_link)?;
++    assert!(read_bounded_file_no_follow(&final_link, 32).is_err());
++    assert!(create_new_file_no_follow(&final_link).is_err());
++    let parent_link = root.join("store");
++    std::os::unix::fs::symlink(&outside, &parent_link)?;
++    assert!(read_bounded_file_no_follow(&parent_link.join("source.md"), 32).is_err());
++    assert!(create_new_file_no_follow(&parent_link.join("new.md")).is_err());
++    assert!(!outside.join("new.md").exists());
++    assert_eq!(std::fs::read_to_string(outside.join("source.md"))?, "SYNTHETIC_OUTSIDE");
++    Ok(())
++}
++
++#[cfg(windows)]
++#[test]
++#[ignore = "requires Windows symlink privilege or developer mode; run explicitly in Windows security CI"]
++fn no_follow_store_rejects_windows_final_and_ancestor_reparse_points() -> std::io::Result<()> {
++    let dir = tempfile::tempdir()?;
++    let root = dir.path().canonicalize()?;
++    let outside = root.join("outside");
++    std::fs::create_dir(&outside)?;
++    std::fs::write(outside.join("source.md"), "SYNTHETIC_OUTSIDE")?;
++    let final_link = root.join("snapshot.md");
++    std::os::windows::fs::symlink_file(outside.join("source.md"), &final_link)?;
++    assert!(read_bounded_file_no_follow(&final_link, 32).is_err());
++    assert!(create_new_file_no_follow(&final_link).is_err());
++    let parent_link = root.join("store");
++    std::os::windows::fs::symlink_dir(&outside, &parent_link)?;
++    assert!(read_bounded_file_no_follow(&parent_link.join("source.md"), 32).is_err());
++    assert!(create_new_file_no_follow(&parent_link.join("new.md")).is_err());
++    assert!(!outside.join("new.md").exists());
++    Ok(())
++}
+diff --git a/codex-rs/exec-server/src/no_follow/mod.rs b/codex-rs/exec-server/src/no_follow/mod.rs
+index 54461e887c9d7e105a2edb20e2bae4a255a5c93d..37031ff2eab4c52a2c030d270495b29e7f424cc4 100644
+--- a/codex-rs/exec-server/src/no_follow/mod.rs
++++ b/codex-rs/exec-server/src/no_follow/mod.rs
+@@ -1,5 +1,6 @@
+ use crate::FileMetadata;
+ use std::io;
++use std::io::Read;
+ use std::path::Path;
+ #[cfg(windows)]
+ use std::time::SystemTime;
+@@ -16,6 +17,34 @@ use unix as imp;
+ #[cfg(windows)]
+ use windows as imp;
+ 
++/// Creates a new regular file without following symlinks/reparse points in any
++/// path component. Existing entries fail rather than being opened or truncated.
++/// The returned handle is the only handle callers should use to write the file.
++pub fn create_new_file_no_follow(path: &Path) -> io::Result<std::fs::File> {
++    imp::create_new_file_sync(path)
++}
++
++/// Opens a regular file through the existing platform no-follow implementation.
++/// Callers must bound their reads or stream input rather than loading arbitrary data.
++pub fn open_regular_file_no_follow(path: &Path) -> io::Result<std::fs::File> {
++    imp::open_file_sync(path)
++}
++
++/// Reads a regular UTF-8 file through a no-follow handle, rejecting oversized
++/// files instead of truncating. Ancestor and final-component links are rejected.
++pub fn read_bounded_file_no_follow(path: &Path, max_bytes: u64) -> io::Result<String> {
++    let limit = max_bytes.checked_add(1).ok_or_else(|| {
++        io::Error::new(io::ErrorKind::InvalidInput, "file byte limit overflow")
++    })?;
++    let file = open_regular_file_no_follow(path)?;
++    let mut bytes = Vec::new();
++    file.take(limit).read_to_end(&mut bytes)?;
++    if bytes.len() as u64 > max_bytes {
++        return Err(io::Error::new(io::ErrorKind::InvalidData, "file exceeds byte limit"));
++    }
++    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
++}
++
+ pub(crate) async fn open_file(path: &Path) -> io::Result<tokio::fs::File> {
+     imp::open_file(path.to_path_buf()).await
+ }
+@@ -58,3 +87,7 @@ pub(crate) async fn create_directory(path: &Path, recursive: bool) -> io::Result
+ pub(crate) async fn remove(path: &Path, recursive: bool, force: bool) -> io::Result<()> {
+     imp::remove(path.to_path_buf(), recursive, force).await
+ }
++
++#[cfg(test)]
++#[path = "bounded_store_tests.rs"]
++mod bounded_store_tests;
+diff --git a/codex-rs/exec-server/src/no_follow/unix.rs b/codex-rs/exec-server/src/no_follow/unix.rs
+index 23a7fcc83a1e2e3daf1586b7d11f690c1d7faab6..d2429f6b2f14a859b049c0a37b39012a0ff6e212 100644
+--- a/codex-rs/exec-server/src/no_follow/unix.rs
++++ b/codex-rs/exec-server/src/no_follow/unix.rs
+@@ -102,7 +102,7 @@ fn open_entry_sync(path: &Path) -> io::Result<std::fs::File> {
+     Ok(std::fs::File::from(file))
+ }
+ 
+-fn open_file_sync(path: &Path) -> io::Result<std::fs::File> {
++pub(super) fn open_file_sync(path: &Path) -> io::Result<std::fs::File> {
+     let file = open_entry_sync(path)?;
+     if !file.metadata()?.is_file() {
+         return Err(io::Error::new(
+@@ -113,6 +113,18 @@ fn open_file_sync(path: &Path) -> io::Result<std::fs::File> {
+     Ok(file)
+ }
+ 
++pub(super) fn create_new_file_sync(path: &Path) -> io::Result<std::fs::File> {
++    let (parent, leaf) = parent(path)?;
++    let file = openat(
++        &parent,
++        leaf,
++        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW
++            | OFlags::NONBLOCK | OFlags::CLOEXEC,
++        Mode::from_raw_mode(0o600),
++    ).map_err(io::Error::from)?;
++    Ok(std::fs::File::from(file))
++}
++
+ pub(super) async fn open_file(path: PathBuf) -> io::Result<tokio::fs::File> {
+     tokio::task::spawn_blocking(move || open_file_sync(&path).map(tokio::fs::File::from_std))
+         .await
+diff --git a/codex-rs/exec-server/src/no_follow/windows.rs b/codex-rs/exec-server/src/no_follow/windows.rs
+index 14a3db30a9feb76cb0fe22ea7e07951d999957c9..ac8add3ae0658a189e371888a1738668614f8562 100644
+--- a/codex-rs/exec-server/src/no_follow/windows.rs
++++ b/codex-rs/exec-server/src/no_follow/windows.rs
+@@ -200,13 +200,25 @@ fn open_entry(path: &Path) -> io::Result<std::fs::File> {
+     Ok(std::fs::File::from(handle))
+ }
+ 
+-fn open_file_sync(path: &Path) -> io::Result<std::fs::File> {
++pub(super) fn open_file_sync(path: &Path) -> io::Result<std::fs::File> {
+     let handle = open_handle(path, FILE_GENERIC_READ, FILE_OPEN, FILE_NON_DIRECTORY_FILE)?;
+     let file = std::fs::File::from(handle);
+     validate_regular_file(&file, path)?;
+     Ok(file)
+ }
+ 
++pub(super) fn create_new_file_sync(path: &Path) -> io::Result<std::fs::File> {
++    let handle = open_handle(
++        path,
++        FILE_READ_ATTRIBUTES | FILE_WRITE_DATA,
++        FILE_CREATE,
++        FILE_NON_DIRECTORY_FILE,
++    )?;
++    let file = std::fs::File::from(handle);
++    validate_regular_file(&file, path)?;
++    Ok(file)
++}
++
+ fn validate_regular_file(file: &std::fs::File, path: &Path) -> io::Result<()> {
+     if !regular_file::is_disk_file(file) || !file.metadata()?.is_file() {
+         return Err(io::Error::new(
+diff --git a/codex-rs/hooks/schema/generated/post-tool-use.command.input.schema.json b/codex-rs/hooks/schema/generated/post-tool-use.command.input.schema.json
+index f92af1dd3249ddf3511ef707c4310329e5b85c80..90405d7c7b45122ace8744365062a2d162176050 100644
+--- a/codex-rs/hooks/schema/generated/post-tool-use.command.input.schema.json
++++ b/codex-rs/hooks/schema/generated/post-tool-use.command.input.schema.json
+@@ -16,6 +16,10 @@
+     "agent_type": {
+       "type": "string"
+     },
++    "context_checkpoint_reminders_native": {
++      "description": "Runtime extension: checkpoint reminders are delivered by the model loop.",
++      "type": "boolean"
++    },
+     "cwd": {
+       "type": "string"
+     },
+@@ -70,4 +74,4 @@
+   ],
+   "title": "post-tool-use.command.input",
+   "type": "object"
+-}
+\ No newline at end of file
++}
+diff --git a/codex-rs/hooks/src/events/post_tool_use.rs b/codex-rs/hooks/src/events/post_tool_use.rs
+index aeb0ed20a7a12cb0ffd7ba979633c8a7557ccdae..8495acc4507bf4ff24bbfaa53f86fc9fbcb53ed4 100644
+--- a/codex-rs/hooks/src/events/post_tool_use.rs
++++ b/codex-rs/hooks/src/events/post_tool_use.rs
+@@ -23,6 +23,7 @@ use crate::schema::SubagentCommandInputFields;
+ #[derive(Debug, Clone)]
+ pub struct PostToolUseRequest {
+     pub session_id: ThreadId,
++    pub context_checkpoint_reminders_native: bool,
+     pub turn_id: String,
+     pub subagent: Option<common::SubagentHookContext>,
+     pub cwd: AbsolutePathBuf,
+@@ -151,6 +152,7 @@ fn command_input_json(request: &PostToolUseRequest) -> Result<String, serde_json
+     let subagent = SubagentCommandInputFields::from(request.subagent.as_ref());
+     serde_json::to_string(&PostToolUseCommandInput {
+         session_id: request.session_id.to_string(),
++        context_checkpoint_reminders_native: request.context_checkpoint_reminders_native.then_some(true),
+         turn_id: request.turn_id.clone(),
+         agent_id: subagent.agent_id,
+         agent_type: subagent.agent_type,
+@@ -349,6 +351,18 @@ mod tests {
+         assert_eq!(input["tool_name"], "apply_patch");
+     }
+ 
++    #[test]
++    fn command_input_reports_native_checkpoint_owner_only_when_enabled() {
++        let mut request = request_for_tool_use("checkpoint");
++        let old: serde_json::Value =
++            serde_json::from_str(&command_input_json(&request).unwrap()).unwrap();
++        assert!(old.get("context_checkpoint_reminders_native").is_none());
++        request.context_checkpoint_reminders_native = true;
++        let native: serde_json::Value =
++            serde_json::from_str(&command_input_json(&request).unwrap()).unwrap();
++        assert_eq!(native["context_checkpoint_reminders_native"], true);
++    }
++
+     #[test]
+     fn block_decision_stops_normal_processing() {
+         let parsed = parse_completed(
+@@ -621,6 +635,7 @@ mod tests {
+     fn request_for_tool_use(tool_use_id: &str) -> super::PostToolUseRequest {
+         super::PostToolUseRequest {
+             session_id: ThreadId::new(),
++            context_checkpoint_reminders_native: false,
+             turn_id: "turn-1".to_string(),
+             subagent: None,
+             cwd: test_path_buf("/tmp").abs(),
+diff --git a/codex-rs/hooks/src/schema.rs b/codex-rs/hooks/src/schema.rs
+index bb50807af5fc242f4fb65a20357920a9fc315a63..fc7cb58c8bf114f4a60ff0570419f0d7b74d9e73 100644
+--- a/codex-rs/hooks/src/schema.rs
++++ b/codex-rs/hooks/src/schema.rs
+@@ -322,6 +322,9 @@ pub(crate) struct PermissionRequestCommandInput {
+ #[schemars(rename = "post-tool-use.command.input")]
+ pub(crate) struct PostToolUseCommandInput {
+     pub session_id: String,
++    /// Runtime extension: checkpoint reminders are delivered by the model loop.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub context_checkpoint_reminders_native: Option<bool>,
+     /// Codex extension: expose the active turn id to internal turn-scoped hooks.
+     pub turn_id: String,
+     #[serde(skip_serializing_if = "Option::is_none")]
