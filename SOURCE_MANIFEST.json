@@ -35,6 +35,9 @@
   "native_source_components": [
     "runtime-review/patches/0001-handoff-compact-checkpoints.patch",
     "runtime-review/patches/0000-sync-workspace-release-lockfile.patch",
-    "runtime-review-v2/patches/0002-atomic-store-and-thread-readback.patch"
-  ]
+    "runtime-review-v2/patches/0002-atomic-store-and-thread-readback.patch",
+    "runtime-review-v2/patches/0003-Fix-handoff-storage-root-path-type.patch"
+  ],
+  "native_result_tree": "a5ae288ba4bfca381405c28f926a420a7d26b057",
+  "native_compile_fix_manifest": "runtime-review-v2/COMPILE-FIX.json"
 }
