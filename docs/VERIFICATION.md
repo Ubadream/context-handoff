@@ -10,6 +10,13 @@
 
 Codex, private runtime overlay (not this repository's gated patches): in ten long-running threads, 574 host-initiated compactions before 2026-09-28; 406 after, 397 of them scheduled by the agent through `wife_compact` (362 A, 35 C). Counted from `compacted` events in the rollout files, deduplicated across forks, with the preceding `wife_compact` call in the same window.
 
+## Patch 0005: consecutive continue compactions
+
+- Found in daily use of the private overlay on 2026-10-09: after one agent-scheduled compaction had removed the request it covered, the next prepare failed with "no current user request can be bound" until the user typed something. The public patches had the same logic.
+- Fix: when the newest relevant item is this thread's `continue` notice, prepare and load use the request recorded in the current binding. A newer user message still wins; a `wait` notice is never carried over; a binding whose handoff ID already appears in that notice is treated as delivered. Local compaction now removes the covered request by message ID instead of removing the last user message.
+- Windows 10 (maintainer's machine, Rust 1.95.0): 5 new unit tests and the new integration test `handoff_compact_second_continue_binds_without_new_message` pass, and the full CI test list passes again (handoff integration 15 passed, 1 ignored). The new integration test fails on the 0004 tree, at the second prepare.
+- Linux: public CI on the commit that adds this patch.
+
 ## Patch 0004: prepared handoffs open
 
 - Gate: `ensure_storage_available` opens on Unix and Windows and stays closed elsewhere; there is still no configuration or environment-variable bypass.

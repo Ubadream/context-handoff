@@ -13,7 +13,9 @@ Long agent sessions hit the context limit, the host compacts, and then:
 - work that was already done gets redone, because the last user message is replayed as if it were new;
 - most of the window was tool output that nobody needed after the next step.
 
-## What works today
+## What's here
+
+Two parts at different stages. The **Claude Code adapter** is in daily use and installs with one command. The **Codex patches** are a source preview: you apply them to a pinned upstream Codex and build it yourself, and they have not yet been through a long real session.
 
 ### Claude Code adapter (`adapters/claude/`), in daily use since late September 2026
 
@@ -29,11 +31,41 @@ Long agent sessions hit the context limit, the host compacts, and then:
 | Thresholds and idle reminder | Reminders at configurable context sizes. If the user goes idle with a large context, one reminder before the prompt cache expires asks the agent to write its handoff and compact, so the user doesn't pay to re-read the whole window. | |
 | Fixed-overhead diet | Rarely used tools are deferred and long skill descriptions shortened (switchable). | |
 
-### Handoff core and native Codex patches (`handoff_core/`, `runtime-review*/`)
+### Codex patches (`runtime-review*/`), source preview
 
-The same flow also runs in the maintainer's Codex, through a private runtime overlay on Windows: the agent writes a handoff, calls `wife_compact(mode="prepare")` to bind it to the thread, then compacts with A or C and either continues or waits. In the maintainer's ten longest-running Codex threads, the host compacted 574 times on its own before the overlay went live on 2026-09-28. Since then there have been 406 compactions: 397 scheduled by the agent through `wife_compact` after binding its handoff (362 A, 35 C), 7 by the host, and 2 where the host compacted after a prepare but before the agent chose a mode. The patches here are the reviewed public extraction of that overlay. Patch 0004 opens prepare, readback and continuation on Unix and Windows. The tests that were ignored while they were closed now run: on Linux in public CI and on the maintainer's Windows machine; running them found and fixed two bugs. Windows also got the hardened store it was missing: the storage directory is opened one component at a time without following junctions or symlinks, and the binding is replaced in place relative to that held directory handle.
+**No installer or prebuilt binary. Daily use so far is in the maintainer's private overlay, not in this public build.**
 
-A small standard-library Python component for revisioned handoff drafts, previews, deterministic exports and binding integrity checks, plus native Codex patches whose runtime gates are still closed. Details, safety properties and verification: [docs/HANDOFF_CORE.md](docs/HANDOFF_CORE.md).
+The same flow as a `handoff_compact` tool inside Codex. The agent writes a handoff file and calls `handoff_compact(mode="prepare")`, which stores a copy and binds it to the thread and to the user request it covers. The agent then compacts with A or C and either continues or waits. After compaction the agent receives an opaque handoff ID and reads the handoff back in bounded pages; the original request is not replayed.
+
+**From the private overlay (same design, not these patches):** in the maintainer's ten longest-running Codex threads, the host compacted 574 times on its own before the overlay went live on 2026-09-28. Since then there have been 406 compactions: 397 scheduled by the agent after binding its handoff (362 A, 35 C), 7 by the host, and 2 where the host compacted after a prepare but before the agent chose a mode.
+
+**Verified on the public patches:**
+
+- Linux, public CI: focused locked compilation; handoff integration tests; store, binding, stream, no-follow and atomic-store tests; hooks and config tests; debug CLI build.
+- Windows 10, maintainer's machine: the same list, plus Windows-only store tests (junction refused, replacement while the old binding is open). On Windows the storage directory is opened one component at a time without following junctions or symlinks, and the binding is replaced relative to that held directory handle.
+- Prepare is open on Unix and Windows and closed on other platforms, with no bypass.
+
+**Known gaps:**
+
+- Not yet run in a long real Codex session on this public build.
+- Windows is not in CI; macOS is untested.
+- One deny-read test cannot run on the CI runner: Codex's filesystem sandbox helper aborts there, and upstream's own deny-read test fails the same way.
+- Bugs found so far and fixed: patch 0004 fixed two in previously ignored tests (a blank handoff created its directory before being rejected; the deny-read test never started a turn). Patch 0005 fixes one found in daily use of the overlay: after one agent-scheduled compaction, a second one with no new user message in between could not bind its handoff, so the agent had to ask the user to say something.
+
+**Try it** (Linux or Windows; Rust 1.95.0; the build takes a while):
+
+    git clone https://github.com/openai/codex upstream
+    git -C upstream checkout ff6aec96948b70d94983af2641a6b67c94faeff5
+    # apply in this order: runtime-review/patches/0001, runtime-review/patches/0000,
+    # then runtime-review-v2/patches/0002, 0003, 0004, 0005 (git -C upstream apply <patch>)
+    cd upstream/codex-rs
+    cargo +1.95.0 build --locked -p codex-cli --bin codex
+
+The workflow in `.github/workflows/source-preview.yml` does exactly this and checks every patch hash and the resulting tree.
+
+### Handoff core (`handoff_core/`)
+
+A small standard-library Python component for revisioned handoff drafts, previews, deterministic exports and binding integrity checks. It is not used by the Claude adapter or the Codex patches at runtime. Details, safety properties and verification: [docs/HANDOFF_CORE.md](docs/HANDOFF_CORE.md).
 
 ## Quick start (Claude Code)
 
@@ -78,7 +110,7 @@ State lives under `~/.local/state/wifeos/` (override with `CW_STATE_ROOT`).
 - The idle reminder has passed tests but has not yet been seen firing after a real idle period.
 - Messages and labels are in Traditional Chinese.
 - Not included from the private setup: recovering summary-dropped sentences with a local ranking model, and the control panel.
-- Codex: the public patches are tested with Codex's own integration harness (mock model server), not yet in a long real session; end-to-end daily use so far is in the private overlay. Windows behaviour is tested on one machine, not in CI. One deny-read test cannot run on the CI runner, where Codex's filesystem sandbox helper aborts; upstream's own deny-read test fails the same way there. See [docs/HANDOFF_CORE.md](docs/HANDOFF_CORE.md).
+- Codex: see [Known gaps](#codex-patches-runtime-review-source-preview) above. The public patches are tested with Codex's own integration harness (a mock model server), not with a real model.
 
 ## Privacy
 

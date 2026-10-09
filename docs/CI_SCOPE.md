@@ -29,3 +29,7 @@ Run [37783812942](https://github.com/Ubadream/context-handoff/actions/runs/37783
 ## Prepared handoffs (branch `codex-prepare-unix`, 2026-10-09)
 
 The native job also applies `runtime-review-v2/patches/0004-Open-prepared-handoffs.patch`, which opens prepared handoffs on Unix and Windows, and runs the previously ignored prepare-dependent tests on Linux. One of them, the deny-read test, is still ignored: on this runner Codex's filesystem sandbox helper aborts (SIGABRT) while loading AGENTS.md, before the turn reaches prepare, and allowing unprivileged user namespaces did not change that. An informational step runs it with `--ignored` next to upstream's own deny-read test as a control; both results are printed and do not fail the job. Windows behaviour is not exercised by this workflow; it was tested on the maintainer's Windows machine.
+
+## Consecutive continue compactions (2026-10-10)
+
+The native job also applies `runtime-review-v2/patches/0005-Carry-the-bound-request-across-continue-compactions.patch`. It adds no new workflow step: its unit tests run under `handoff_binding` and its integration test (`handoff_compact_second_continue_binds_without_new_message`) under `handoff_compact`.
