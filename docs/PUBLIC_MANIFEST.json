@@ -35,7 +35,7 @@
     "docs/HANDOFF_CORE.md": "f96cc9711e8055ec28d9372f2d2d21d7bfcd4c7b12ed25abc4acfe69a3c0820c",
     "docs/LICENSE_REVIEW.md": "b387d7523cae3538ceea0edcef3bf718391389d759d671de0cf75f191b01c158",
     "docs/SOURCE_MANIFEST.json": "86fc5aef483b1c54bec003e6e94de20820d32add8132f7edde94d0d1b9f2429a",
-    "docs/VERIFICATION.md": "38e3480119e2e5d7b219b2b42709ffc630813320bb5958ae1e71e7bd19eb90c3",
+    "docs/VERIFICATION.md": "6d57d7473cd6f853fb85833ca761635c66105b69dc19bb9829d750ae2d200abf",
     "handoff_core/__init__.py": "de11a6dd9707490fb7273b936bc93daea2cdf35012c1f91d3fac54531b6dbcf3",
     "handoff_core/__main__.py": "d1064ab4e9a68b13a2438cb46738aa11ebe09f74ce612060642d0106c81c9ef6",
     "handoff_core/drafts.py": "6c06d4e13feab8a813f8831df3ced7da1466bff8fb942c268c22ccd0392ef2fb",
