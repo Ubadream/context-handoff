@@ -11,3 +11,7 @@ The separately scoped `runtime-review/` and `runtime-review-v2/` distributions c
 ## Claude Code adapter (added 2026-10-09)
 
 `adapters/claude/` and `tests/claude/` are generated from the private source repository by an explicit allowlist exporter that refuses to write if it finds account names, email addresses or absolute user paths. Not included: `compact_gap` (needs a private local ranking model and recall tool) and `cw_advice` (needs the private panel core). The installer skips hooks whose scripts are absent. No transcripts, state, tool archives or settings files are included.
+
+## Codex hooks (added 2026-10-11)
+
+`adapters/codex/hooks/cw_codex_hooks.py`, `adapters/codex/install_codex_hooks.py` and their tests were written for this repository, not exported from the private source. The private overlay's own Codex hooks (RMS handoff injection, output winnowing, the panel's status hook) are not included.

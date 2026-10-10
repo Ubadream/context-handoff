@@ -17,6 +17,14 @@ Codex, private runtime overlay (not this repository's gated patches): in ten lon
 - 6 unit tests (`tests/codex`) on synthetic data: the patch series matches what CI applies; patch files match their hashes; a tampered patch is refused; the install goes to its own directory under `CODEX_HOME/runtimes` and the launcher turns reminders on; `doctor` and `uninstall` touch only installs the installer marked; `prepare` refuses a checkout of another commit.
 - Not verified: the default `release` profile in CI; macOS and Linux installs; a real Codex desktop or CLI session running the installed build on any machine other than the maintainer's.
 
+## Codex hooks (`adapters/codex/hooks/`)
+
+- 2026-10-11, maintainer's Windows 10 machine, Codex 0.159.2 (npm, unmodified), both through the native `codex.exe` and the npm `codex.cmd` launcher: `install_codex_hooks.py apply`, `trust` and `doctor` (four hooks, all `trust=trusted`), then one `codex exec` turn against a loopback model. Observed in the requests the model received: the threshold reminder as a developer message before the host's automatic compaction; the compaction prompt; after compaction, the note naming the handoff, saying the last request is not new and giving the index ID. `list` and `get` on the index returned the user's original words with the SHA-256 check passing.
+- Also observed: hook events carry no token counts (PostToolUse sends `tool_name`, `tool_input`, `tool_response`, `turn_id`, `transcript_path`), and the token count for a model response is not yet in the transcript when the next PostToolUse runs. The reminder therefore lands one tool call after the threshold is crossed; the test asserts that behaviour.
+- A tool call rejected by the sandbox produced no PostToolUse event.
+- Index cost on a real 1.69 GB Codex transcript (read-only): 485 sections in 10.9 s; reading the latest token count from the tail took 2 ms.
+- Unit tests: 11, on synthetic rollouts (thresholds once each and reset after compaction, token and fraction thresholds, fresh/stale/missing handoff, second compaction indexes only the new part, changed bytes refused, foreign transcript and subagent events ignored, hook errors print `{}` and exit 0, installer keeps other config and is idempotent, dry run writes nothing, damaged block refused).
+- Not verified: long real sessions; the Codex desktop app (it runs the same hook engine, but this was not observed); macOS.
 ## Patch 0005: consecutive continue compactions
 
 - Found in daily use of the private overlay on 2026-10-09: after one agent-scheduled compaction had removed the request it covered, the next prepare failed with "no current user request can be bound" until the user typed something. The public patches had the same logic.

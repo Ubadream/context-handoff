@@ -34,6 +34,26 @@ jobs:
           python3 -m venv .venv
           .venv/bin/python -m pip install --quiet pytest==8.4.2
           CW_STATE_ROOT="$RUNNER_TEMP/cw-state" .venv/bin/python -m pytest -q tests/claude tests/codex
+  codex-hooks:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install unmodified Codex 0.159.2 from npm
+        run: npm install --global --no-fund --no-audit @openai/codex@0.159.2
+      - name: Hooks-only adapter inside real Codex (isolated CODEX_HOME, loopback model, no credentials)
+        run: |
+          python -m venv .venv
+          if [ -x .venv/bin/python ]; then py=.venv/bin/python; codex="$(command -v codex)"; else py=.venv/Scripts/python; codex="$(cygpath -w "$(command -v codex.cmd)")"; fi
+          "$py" -m pip install --quiet pytest==8.4.2
+          "$codex" --version
+          CW_CODEX_TEST_BINARY="$codex" "$py" -m pytest -q -rs tests/codex/test_codex_hooks.py tests/codex/test_codex_hooks_native.py
   native:
     runs-on: ubuntu-24.04
     timeout-minutes: 360

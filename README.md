@@ -15,7 +15,13 @@ Long agent sessions hit the context limit, the host compacts, and then:
 
 ## What's here
 
-Two parts at different stages. The **Claude Code adapter** is in daily use and installs with one command. The **Codex patches** are a source preview: one command builds them from source and installs the result next to your existing Codex, but they have not yet been through a long real session.
+Three parts at different stages:
+
+- the **Claude Code adapter** is in daily use and installs with one command;
+- the **Codex hooks** work with the Codex you already have, with no rebuild, and cover the parts hooks can reach;
+- the **Codex patches** add what hooks cannot (the agent choosing when to compact, and a handoff bound to the request it covers). They are a source preview: one command builds them from source and installs the result next to your existing Codex, but they have not yet been through a long real session.
+
+Rule of thumb for Codex: start with the hooks. Use the patches if you want the agent itself to decide when to compact.
 
 ### Claude Code adapter (`adapters/claude/`), in daily use since late September 2026
 
@@ -30,6 +36,37 @@ Two parts at different stages. The **Claude Code adapter** is in daily use and i
 | Handoff check | Before compacting: is the handoff newer than the last user message and file edit? The optional model lists what the handoff may have missed. | |
 | Thresholds and idle reminder | Reminders at configurable context sizes. If the user goes idle with a large context, one reminder before the prompt cache expires asks the agent to write its handoff and compact, so the user doesn't pay to re-read the whole window. | |
 | Fixed-overhead diet | Rarely used tools are deferred and long skill descriptions shortened (switchable). | |
+
+### Codex hooks (`adapters/codex/hooks/`), no rebuild
+
+**Added 2026-10-11. Tested inside real, unmodified Codex 0.159.2 (CI on Linux and Windows); not yet used daily.** Four standard Codex hooks, one Python script, nothing compiled. Because it only uses Codex's documented hook events, it keeps working when Codex updates, unlike the patches.
+
+| Hook | What it does |
+|---|---|
+| PostToolUse, UserPromptSubmit | Context-size reminders, once per threshold until the next compaction. Default: at 60% of the model's context window, update the handoff at the next natural break; at 80%, save it now and tell the user it is a good point to run `/compact`. |
+| PreCompact | Records where the transcript ended, which handoff file is newest in the working directory, and when the user last spoke. |
+| SessionStart (compact) | Tells the agent which handoff to read first, and whether it was saved before or after the user's latest message; says the last request in the summary is not a new one; points to an index of the part that was just compacted. |
+| (command) | `list <ID>` and `get <ID>§N` read a section of the compacted transcript back, split at each user message, after checking its SHA-256 against the index. |
+
+**What hooks cannot do, compared with the patches:**
+
+| | Hooks | Patches |
+|---|---|---|
+| Who starts compaction | The user (`/compact`) or the host's automatic limit; the agent can only ask | The agent, with a `handoff_compact` tool, at a break it picks |
+| Not replaying the last request | An instruction after compaction; the model can still ignore it | The handoff is bound to the request it covers; the host does not replay it |
+| Handoff | Newest `HANDOFF*.md` in the working directory, with a freshness check | A copy stored and bound to the thread at prepare time |
+| Codex upgrades | Keeps working | Pinned to 0.159.2 until the patches are rebased |
+| Install | Edits one marked block in `config.toml` | Builds Codex from source (tens of GB, a long first build) |
+
+**Verified:** in CI, with Codex 0.159.2 from npm on Linux and Windows: an isolated `CODEX_HOME`, a loopback model server, no account or credentials. The test installs the hooks, trusts them through Codex's own `hooks/list`, and runs one turn: two tool calls, the host's automatic compaction, one more request. It then checks that the reminder reached the model before compaction, that the note after compaction names the handoff and gives an index ID, and that `get` returns the user's original words. Unit tests cover thresholds, stale or missing handoffs, the second compaction indexing only the new part, refusing a transcript whose bytes changed, and installer edits that leave the rest of `config.toml` alone. On a real 1.69 GB Codex transcript, the first index took 11 seconds (hook timeout: 60).
+
+**Known gaps:**
+
+- Hook events carry no token counts, and Codex writes them to the transcript asynchronously, so a reminder arrives one tool call after the threshold is crossed. Keep the last threshold well below the host's automatic-compaction limit.
+- Not yet used in long real sessions. The maintainer's daily Codex runs the private overlay, which has its own hooks.
+- macOS untested.
+
+**Install:** see [Quick start (Codex hooks)](#quick-start-codex-hooks).
 
 ### Codex patches (`runtime-review*/`), source preview
 
@@ -89,6 +126,28 @@ Tool output, saved originals and handoffs are stored as plain text under the sta
 
 Without it, segmentation and the handoff freshness check still run; there are just no suggestions.
 
+## Quick start (Codex hooks)
+
+Requirements: Codex with hooks (tested with 0.159.2), Python 3.11+.
+
+    python adapters/codex/install_codex_hooks.py apply --dry-run   # shows what would change
+    python adapters/codex/install_codex_hooks.py apply
+    python adapters/codex/install_codex_hooks.py trust             # or review the new hooks in Codex
+    python adapters/codex/install_codex_hooks.py doctor            # all four should say trust=trusted
+
+Then restart Codex. `apply` backs up `$CODEX_HOME/config.toml`, writes one block between `# BEGIN context-handoff hooks` and `# END context-handoff hooks`, and turns on `[features] hooks = true` (inside your existing `[features]` table if there is one). Codex only runs a hook after it is trusted; `trust` asks Codex itself for the hash of each of these four commands and records only those. `remove` takes the block out again.
+
+Optional settings, in `$CODEX_HOME/context-handoff/hooks.json`:
+
+    {"thresholds": [0.6, 0.8], "handoff_globs": ["HANDOFF*.md", "handoff*.md"]}
+
+A threshold below 1 is a fraction of the model's context window; 1 or more is a token count. Reading a compacted section back:
+
+    python adapters/codex/hooks/cw_codex_hooks.py list <ID>
+    python adapters/codex/hooks/cw_codex_hooks.py get <ID>§2
+
+To see exactly what Codex sends to the hooks, set `CONTEXT_HANDOFF_HOOK_LOG` to a file path.
+
 ## How it fits together
 
     user message ─► UserPromptSubmit: context_watch (threshold reminders)
@@ -109,11 +168,11 @@ State lives under `~/.local/state/wifeos/` (override with `CW_STATE_ROOT`).
 - The idle reminder has passed tests but has not yet been seen firing after a real idle period.
 - Messages and labels are in Traditional Chinese.
 - Not included from the private setup: recovering summary-dropped sentences with a local ranking model, and the control panel.
-- Codex: see [Known gaps](#codex-patches-runtime-review-source-preview) above. The public patches are tested with Codex's own integration harness (a mock model server), not with a real model.
+- Codex: see the known gaps for the [hooks](#codex-hooks-adapterscodexhooks-no-rebuild) and the [patches](#codex-patches-runtime-review-source-preview) above. Both are tested against a mock model server, not with a real model.
 
 ## Privacy
 
-Everything runs locally and is stored as plain text: tool archives, saved originals, handoffs. Nothing is sent anywhere unless you set `CW_MODEL_CMD`, and then only to the command you chose. There is no secret redaction; protect the state directory accordingly.
+Everything runs locally and is stored as plain text: tool archives, saved originals, handoffs. The Codex hooks keep their state in `$CODEX_HOME/context-handoff/`: byte offsets, hashes and the first 160 characters of each user message; `get` reads the transcript Codex already keeps. Nothing is sent anywhere unless you set `CW_MODEL_CMD`, and then only to the command you chose. There is no secret redaction; protect the state directory accordingly.
 
 ## License
 
