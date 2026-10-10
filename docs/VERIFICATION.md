@@ -10,6 +10,13 @@
 
 Codex, private runtime overlay (not this repository's gated patches): in ten long-running threads, 574 host-initiated compactions before 2026-09-28; 406 after, 397 of them scheduled by the agent through `wife_compact` (362 A, 35 C). Counted from `compacted` events in the rollout files, deduplicated across forks, with the preceding `wife_compact` call in the same window.
 
+## Codex installer (`adapters/codex/install_codex.py`)
+
+- Windows 10 (maintainer's machine, 2026-10-10): `install --profile dev-small` into a separate `CODEX_HOME` fetched the pinned upstream commit, verified the six patch-file hashes, the resulting tree and lockfile, built with upstream's packaging script, and `doctor` passed.
+- Windows, public CI [run 38040861154](https://github.com/Ubadream/context-handoff/actions/runs/38040861154) on branch `codex-installer` (commit 6586654), `windows-2025` runner: `windows-install` ran `plan`, `install --profile dev-small`, `doctor` (`codex-cli 0.159.2`), the `codex-handoff` launcher's `--version`, and `uninstall`, which removed the install directory. `windows-tests` prepared the source with the installer and ran the seven focused filters: 50 passed, 2 ignored, 0 failed (handoff integration 15 passed, 1 ignored; `handoff_binding` 6 passed). The Linux jobs in the same run also passed.
+- 6 unit tests (`tests/codex`) on synthetic data: the patch series matches what CI applies; patch files match their hashes; a tampered patch is refused; the install goes to its own directory under `CODEX_HOME/runtimes` and the launcher turns reminders on; `doctor` and `uninstall` touch only installs the installer marked; `prepare` refuses a checkout of another commit.
+- Not verified: the default `release` profile in CI; macOS and Linux installs; a real Codex desktop or CLI session running the installed build on any machine other than the maintainer's.
+
 ## Patch 0005: consecutive continue compactions
 
 - Found in daily use of the private overlay on 2026-10-09: after one agent-scheduled compaction had removed the request it covered, the next prepare failed with "no current user request can be bound" until the user typed something. The public patches had the same logic.
