@@ -90,3 +90,18 @@ def test_missing_tools_give_null(tmp_path, monkeypatch):
     assert item["mode"] is None and item["compact_gap"] is None and item["originals_file"] is None
     assert cw.handoffs(cw.find_session("s1")) == []  # handoff_bind 跟著倉庫走，一定在；這個視窗沒寫過交接
     assert cw.session_row(cw.find_session("s1"))["context_tokens"] is None  # 壓完還沒有新回應
+
+
+def test_parse_utc_accepts_utc_boundaries_and_rejects_non_timestamps(tmp_path, monkeypatch):
+    """Timestamp fields may be absent or malformed in local transcript JSON."""
+    cw = load(tmp_path, monkeypatch)
+
+    epoch = cw.parse_utc("1970-01-01T00:00:00Z")
+    offset = cw.parse_utc("2026-09-28T12:34:56.789+05:30")
+
+    assert epoch is not None and epoch.isoformat() == "1970-01-01T00:00:00+00:00"
+    assert offset is not None and offset.isoformat() == "2026-09-28T12:34:56.789000+05:30"
+    assert cw.parse_utc("") is None
+    assert cw.parse_utc("not a timestamp ☃") is None
+    assert cw.parse_utc(None) is None
+    assert cw.parse_utc(0) is None
