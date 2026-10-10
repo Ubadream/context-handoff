@@ -15,7 +15,7 @@ Long agent sessions hit the context limit, the host compacts, and then:
 
 ## What's here
 
-Two parts at different stages. The **Claude Code adapter** is in daily use and installs with one command. The **Codex patches** are a source preview: you apply them to a pinned upstream Codex and build it yourself, and they have not yet been through a long real session.
+Two parts at different stages. The **Claude Code adapter** is in daily use and installs with one command. The **Codex patches** are a source preview: one command builds them from source and installs the result next to your existing Codex, but they have not yet been through a long real session.
 
 ### Claude Code adapter (`adapters/claude/`), in daily use since late September 2026
 
@@ -33,7 +33,7 @@ Two parts at different stages. The **Claude Code adapter** is in daily use and i
 
 ### Codex patches (`runtime-review*/`), source preview
 
-**No installer or prebuilt binary. Daily use so far is in the maintainer's private overlay, not in this public build.**
+**No prebuilt binary; the installer below builds from source. Daily use so far is in the maintainer's private overlay, not in this public build.**
 
 The same flow as a `handoff_compact` tool inside Codex. The agent writes a handoff file and calls `handoff_compact(mode="prepare")`, which stores a copy and binds it to the thread and to the user request it covers. The agent then compacts with A or C and either continues or waits. After compaction the agent receives an opaque handoff ID and reads the handoff back in bounded pages; the original request is not replayed.
 
@@ -48,20 +48,19 @@ The same flow as a `handoff_compact` tool inside Codex. The agent writes a hando
 **Known gaps:**
 
 - Not yet run in a long real Codex session on this public build.
-- Windows is not in CI; macOS is untested.
+- Windows runs in CI (installer end to end, and the focused native tests); macOS is untested.
 - One deny-read test cannot run on the CI runner: Codex's filesystem sandbox helper aborts there, and upstream's own deny-read test fails the same way.
 - Bugs found so far and fixed: patch 0004 fixed two in previously ignored tests (a blank handoff created its directory before being rejected; the deny-read test never started a turn). Patch 0005 fixes one found in daily use of the overlay: after one agent-scheduled compaction, a second one with no new user message in between could not bind its handoff, so the agent had to ask the user to say something.
 
-**Try it** (Linux or Windows; Rust 1.95.0; the build takes a while):
+**Install** (Linux or Windows; needs git, Python 3.11+ and [Rust](https://rustup.rs), plus the Visual Studio C++ build tools on Windows):
 
-    git clone https://github.com/openai/codex upstream
-    git -C upstream checkout ff6aec96948b70d94983af2641a6b67c94faeff5
-    # apply in this order: runtime-review/patches/0001, runtime-review/patches/0000,
-    # then runtime-review-v2/patches/0002, 0003, 0004, 0005 (git -C upstream apply <patch>)
-    cd upstream/codex-rs
-    cargo +1.95.0 build --locked -p codex-cli --bin codex
+    python adapters/codex/install_codex.py plan      # checks tools, shows paths
+    python adapters/codex/install_codex.py install   # builds from source; the first build takes a long time and tens of GB
+    python adapters/codex/install_codex.py doctor
 
-The workflow in `.github/workflows/source-preview.yml` does exactly this and checks every patch hash and the resulting tree.
+`install` fetches the pinned upstream Codex (0.159.2, commit `ff6aec9`), refuses to continue unless every patch matches the hash in `runtime-review-v2/PATCH_SERIES.json` and the patched source matches the reviewed tree, builds with upstream's own packaging script, and checks that `Cargo.lock` did not change. It installs into its own directory under `$CODEX_HOME/runtimes/` and writes a launcher there, `codex-handoff`, which runs this build with checkpoint reminders turned on. Your existing Codex, its config and the Codex desktop app are not touched; `uninstall` removes only what `install` created. `--profile dev-small` builds faster but unoptimized.
+
+This build reads the same `~/.codex` as your normal Codex, and it is pinned to 0.159.2: it will not follow upstream releases until the patches are rebased.
 
 ### Handoff core (`handoff_core/`)
 

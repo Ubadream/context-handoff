@@ -1,0 +1,2 @@
+runtime-review/patches/*.patch -text
+runtime-review-v2/patches/*.patch -text

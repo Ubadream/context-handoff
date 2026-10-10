@@ -1,0 +1,15 @@
+{
+  "upstream_repository": "https://github.com/openai/codex",
+  "upstream_commit": "ff6aec96948b70d94983af2641a6b67c94faeff5",
+  "upstream_version": "0.159.2",
+  "patches": [
+    {"path": "runtime-review/patches/0001-handoff-compact-checkpoints.patch", "sha256": "ed28854b7ee5e048620ce60ebaaea17cd58750350852bd4e5caad29c24b61e54"},
+    {"path": "runtime-review/patches/0000-sync-workspace-release-lockfile.patch", "sha256": "1b99ed3fc93196fac8535ab01b0f9d3dfedb9593eb071613e83c4568c9fc2d0d"},
+    {"path": "runtime-review-v2/patches/0002-atomic-store-and-thread-readback.patch", "sha256": "82a42653f77077507f834af350f8458d7909af152ea9c2d6874bc759411f61f6"},
+    {"path": "runtime-review-v2/patches/0003-Fix-handoff-storage-root-path-type.patch", "sha256": "668c48d3d0b42dd90c201688b6be86930a7878aa5da9f91bf4dbc487b3c894c6"},
+    {"path": "runtime-review-v2/patches/0004-Open-prepared-handoffs.patch", "sha256": "75045192c4bd8b0de628fed48737c7bbd2d835296e20d7d4d4562da358872e15"},
+    {"path": "runtime-review-v2/patches/0005-Carry-the-bound-request-across-continue-compactions.patch", "sha256": "bdeef110d05d965317d1c80f802af53d04c65f00cb932adab8135a7cde871157"}
+  ],
+  "patched_tree": "bda6f0bc7df7970c0f63ec9a3f31f25832dd740c",
+  "cargo_lock_sha256": "e85460a5c2a1f92d73ca0a40219c846f6a10d729f3186667485372c3aa82cfbf"
+}

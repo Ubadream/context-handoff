@@ -29,11 +29,11 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - name: Claude Code adapter unit tests (synthetic data, no Claude Code install)
+      - name: Claude Code adapter and Codex installer unit tests (synthetic data, no Claude Code or Codex install)
         run: |
           python3 -m venv .venv
           .venv/bin/python -m pip install --quiet pytest==8.4.2
-          CW_STATE_ROOT="$RUNNER_TEMP/cw-state" .venv/bin/python -m pytest -q tests/claude
+          CW_STATE_ROOT="$RUNNER_TEMP/cw-state" .venv/bin/python -m pytest -q tests/claude tests/codex
   native:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
@@ -124,3 +124,55 @@ jobs:
           echo 'Source preview. Prepared handoffs, controlled readback, binding loading and continuation are enabled on Unix and Windows by patch 0004; patch 0005 keeps consecutive continue compactions bound; this Linux job exercises them, Windows was verified on the maintainer machine.' >> "$GITHUB_STEP_SUMMARY"
           echo '2 tests ignored: Windows symlink privilege, and deny-read (sandbox helper aborts on this runner; see the informational step). No Windows, remote readback, production install, release-profile build, or full upstream test-suite validation.' >> "$GITHUB_STEP_SUMMARY"
           echo 'Check each step conclusion. An attempted build is not a pass; a green job does not enable disabled behavior.' >> "$GITHUB_STEP_SUMMARY"
+  windows-install:
+    runs-on: windows-2025
+    timeout-minutes: 360
+    env:
+      CARGO_INCREMENTAL: '0'
+      CODEX_HOME: D:\codex-home
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install exact official Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal -c clippy -c rustfmt -c rust-src
+      - name: Plan
+        run: python adapters/codex/install_codex.py plan --workdir 'D:\ch-src' --profile dev-small
+      - name: Install with the installer (fetch, verify, apply, build, package)
+        run: python adapters/codex/install_codex.py install --workdir 'D:\ch-src' --profile dev-small
+      - name: Doctor
+        run: python adapters/codex/install_codex.py doctor
+      - name: Launcher accepts the reminder setting
+        run: |
+          set -euo pipefail
+          launcher="$(cygpath -u "$CODEX_HOME")/runtimes/context-handoff-0.159.2-bda6f0bc/codex-handoff.cmd"
+          cmd //c "$(cygpath -w "$launcher")" --version
+      - name: Uninstall
+        run: python adapters/codex/install_codex.py uninstall
+  windows-tests:
+    runs-on: windows-2025
+    timeout-minutes: 360
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      RUST_MIN_STACK: '8388608'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install exact official Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal -c clippy -c rustfmt -c rust-src
+      - name: Prepare source with the installer
+        run: python adapters/codex/install_codex.py prepare --workdir 'D:\ch-src'
+      - name: Focused native tests on Windows
+        working-directory: D:\ch-src\codex-rs
+        run: |
+          set -euo pipefail
+          cargo +1.95.0 test --locked -p codex-core handoff_compact
+          cargo +1.95.0 test --locked -p codex-core handoff_binding
+          cargo +1.95.0 test --locked -p codex-core checkpoint_reminder
+          cargo +1.95.0 test --locked -p codex-exec-server no_follow_store
+          cargo +1.95.0 test --locked -p codex-exec-server --lib atomic_store
+          cargo +1.95.0 test --locked -p codex-core --lib handoff_store
+          cargo +1.95.0 test --locked -p codex-core --lib handoff_stream
