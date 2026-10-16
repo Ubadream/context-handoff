@@ -1,4 +1,7 @@
-"""UserPromptSubmit hook：上下文跨過門檻時，在老婆這邊冒一句，讓她提醒老公。
+"""UserPromptSubmit／PostToolUse hook：上下文跨過門檻時，在老婆這邊冒一句。
+
+PostToolUse 也掛（1016）：10-14 一個視窗在同一回合連讀材料，從 39.5 萬做了 49 次工具呼叫一路長到 86 萬，中間老公沒說話、
+提醒一次都沒冒，宿主就自己壓了。
 
 只提醒、不壓縮、不改上限（老公 0925 定案：壓不壓由他喊，還在做就不壓）。
 每個門檻每段只冒一次；壓縮後用量掉下來就重新算。失敗一律安靜放行。
@@ -77,11 +80,14 @@ def main():
                 "（先更新交接；細節正熱用 C），同一則回覆先跟老公說。")
     elif top >= th["consider"]:
         tail = ("老公授權老婆自己判斷時機（0925）：這段工作收尾、交接剛更新好時，可以用 wife-compact 的 compact 工具壓"
-                "（A 預設／C 細節正熱／B 整段細節都要），先跟老公說；工具做到一半或他正在講就不壓。")
+                "（A 預設／C 細節正熱），先跟老公說；工具做到一半或他正在講就不壓。")
     else:
-        tail = "還早，不用壓；接下來留意段落點。"
+        tail = "這件事做完、走到斷點，就更新交接並用 wife-compact 的 compact 工具自選模式壓縮，不用等老公說。"
+    event = data.get("hook_event_name") or "UserPromptSubmit"
+    if event == "PostToolUse":
+        tail += "現在在工具迴圈裡：做完手上這一步就是可以停的地方，別一路讀到底才回頭。"
     msg = f"[上下文提醒｜約 {wan} 萬 token，剛跨過 {top // 10_000} 萬。{tail}]"
-    print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": msg}}, ensure_ascii=False))
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": msg}}, ensure_ascii=False))
 
 
 if __name__ == "__main__":

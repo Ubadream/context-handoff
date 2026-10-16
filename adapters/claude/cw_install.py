@@ -38,10 +38,12 @@ HOOKS = [
     ("PostToolUseFailure", "", "hooks/tool_archive.py", "", 5),
     ("PostToolUse", TRIM_MATCHER, "hooks/tool_output_trim.py", "", 10),
     ("UserPromptSubmit", "", "hooks/context_watch.py", "", 5),
+    ("PostToolUse", "", "hooks/context_watch.py", "", 5),
     ("UserPromptSubmit", "", "hooks/compact_gap.py", "", 40),
     ("SessionStart", "compact", "hooks/compact_gap.py", "", 90),
     ("PostCompact", "", "hooks/compact_gap.py", "", 10),
     ("SessionStart", "compact|resume", "hooks/handoff_bind.py", "", 15),
+    ("PreCompact", "", "hooks/handoff_snapshot.py", "", 15),
     ("PostToolUse", "", "cw_advice.py", "hook", 10),
     ("UserPromptSubmit", "", "cw_advice.py", "hook", 10),
 ]

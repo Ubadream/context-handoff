@@ -2,11 +2,13 @@
 
 **Your coding agent decides when to compact, writes its own handoff first, and can get every original back later — instead of being cut off mid-task by automatic compaction.**
 
-From the maintainer's daily Claude Code sessions since 2026-09-25:
+From the maintainer's daily Claude Code sessions, 2026-09-25 to 10-16:
 
-- **24 compactions, none forced by the host.** Every one happened at a chosen break: scheduled by the agent, or by the user typing `/compact`. The day before, without this, the host compacted twice in the middle of work, once at 888K tokens.
-- **Median context 412K → 89K tokens** per compaction (21 measurable; about 70K of the "after" is fixed overhead no compaction can touch).
+- **46 compactions, 45 at a chosen break**: scheduled by the agent, or by the user typing `/compact`. The one the host forced (Oct 14, at 860K) came from a single long turn of tool calls with no user message in between, so the reminder never ran; reminders now also fire after tool calls. The day before the adapter, the host compacted twice in the middle of work, once at 888K.
+- **Median context 379K → 83K tokens** per compaction (43 measurable; about 70K of the "after" is fixed overhead no compaction can touch).
 - **579 messages → 30 lines** in one compaction, with every tool call and result still one `get <id>` away.
+
+![Context before and after each compaction, Sep 23 to Oct 16, 2026](docs/img/compactions.svg)
 
 Works with **Claude Code** (in daily use) and **Codex** (hooks for the Codex you already have, or patches that let the agent compact itself). Everything runs locally.
 
@@ -83,9 +85,11 @@ For the Codex patches, see [their install section](#install-codex-patches).
     user message ─► UserPromptSubmit: context_watch (threshold reminders)
     tool call ────► PreToolUse/PostToolUse: tool_archive (full copy + ID)
                                             tool_output_trim (large output → file)
+                                            context_watch (reminders inside long tool loops too)
     agent ────────► wife-compact tools: prepare / segments / handoff_check / compact / get / context
     end of turn ──► wife-compact: run the compaction the agent scheduled
                     (drop confirmed segments → tool calls to one line → A or C)
+    compaction ───► PreCompact: handoff_snapshot (full text + SHA-256 of the handoff at that moment)
     after compact ► SessionStart: handoff_bind (hand the agent back its own handoff file)
 
 State lives under `~/.local/state/wifeos/` (override with `CW_STATE_ROOT`).
@@ -94,7 +98,7 @@ The two compaction modes: **A** uses the host's built-in summary; **C** is the s
 
 ## Claude Code adapter (`adapters/claude/`)
 
-In daily use since late September 2026. Across the 21 compactions where the result is measurable, median context went from 412K tokens before to 89K after (range 61K to 112K); roughly 70K of the "after" is fixed overhead (tool definitions, instructions, memory files) that compaction cannot touch.
+In daily use since late September 2026. Across the 43 compactions where the result is measurable (2026-09-25 to 10-16), median context went from 379K tokens before to 83K after (range 61K to 112K); roughly 70K of the "after" is fixed overhead (tool definitions, instructions, memory files) that compaction cannot touch.
 
 | Feature | What it does | Measured on a real session |
 |---|---|---|
