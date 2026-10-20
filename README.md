@@ -1,38 +1,36 @@
 # Context Handoff
 
-When a coding agent loses the thread after context compaction, a smaller summary alone may not be enough to resume the work. Context Handoff is built for **verifiable same-task continuation**: **capture → bind → deliver → retrieve → continue/wait**. Save a handoff before compaction, associate it with the work it covers, deliver it afterward, and retrieve indexed original words or tool evidence when details are missing, so the agent can resume the remaining work or wait for a decision. Support differs by host: public adapters provide parts of this chain; request binding lives in the Codex source-preview patches, and the private adapter's explicit continue/wait flow is not yet public. This is an inspectable recovery path, not a guarantee that the model will remember or follow every instruction.
+Keeps a coding agent on the same task across context compaction.
 
-## Problem → mechanism
+Before compaction, the agent writes a handoff. After compaction, it gets that handoff back, is told the last message is not a new request, and can pull up the original words by ID whenever the summary left something out.
 
-| Problem | Mechanism and its boundary | Support level |
+Works with Claude Code (in daily use) and Codex (hooks; a patched build as source preview).
+
+## What it fixes
+
+| Problem | What we do | Status |
 |---|---|---|
-| **P1 — Cut off mid-task; precise values, reasons and rejected approaches disappear** | Write a handoff at a natural break, check freshness, and save a snapshot. Retrieve original sections with content hashes or archived tool round-trips by ID. Completeness still depends on what the agent writes and retrieves. Automatic recovery of omitted sentences with a ranking model is **private-only**, with a public version **planned**. | **Public Claude adapter:** agent-scheduled A/C compaction, archives and retrieval. **Codex hooks:** reminders, snapshots and transcript retrieval; user/host starts compaction. **Codex patches:** agent-triggered compaction, source preview. |
-| **P2 + P7 — Rules and their provenance become unclear** | Original-word indexes let the agent inspect the source instead of trusting the summary alone. The optional Claude three-part handoff check asks for source pointers; it is advisory. Ranking negative constraints first and classifying speakers in recovered sentences are **private-only**. A per-rule ledger of proposer, adopter, time, source and active/superseded status is **planned**, not shipped. | **Public Claude adapter / Codex hooks:** indexed originals, not a complete provenance ledger. **Not yet public:** ranking-based recovery, recovered-sentence speaker classification and rule-by-rule provenance. |
-| **P3 — Compaction is slow, stuck or repeated** | Keep large tool output in files and compact earlier where supported, reducing context volume. Stalls, provider limits and compactor bugs are **host problems**; this project does not fix them. | **Public Claude adapter:** large-output trimming and checkpoint reminders. **Codex hooks:** checkpoint reminders. **Codex patches:** agent-selected checkpoints, source preview. Volume reduction only. |
-| **P4 — Completed work is repeated; old requests are replayed** | Codex hooks say the last historical request is already covered; the Claude adapter directs the agent to its own handoff and original words, without that explicit no-replay note. Prompts can be ignored. The patches bind the handoff to its covered request and remove that request from replay in the host. A completed-side-effects ledger is **planned**. | **Public Claude adapter / Codex hooks:** reminder layer. **Codex patches:** host request binding, source preview; not a general exactly-once guarantee for external effects. |
-| **P5 — A stale handoff overrides a newer message** | Check handoff freshness and preserve the copy from the compaction boundary. The patches give a newer user message priority when binding. The private continuation flow also yields to new input; explicitly delivering post-snapshot messages is **planned**. Freshness does not prove task identity or completeness. | **Public Claude adapter / Codex hooks:** freshness and snapshots. **Codex patches:** thread/request binding, source preview. **Not yet public:** private continuation-input handling and planned late-message delivery. |
-| **P6 — The agent stops after compaction, or continues when it should wait** | Explicit continue/wait in the private adapter is **not yet public** and its newly installed flow still needs live verification. The public patches contain a continue/wait design and focused tests, but have not completed a long real session on this public build. | **Not yet public:** private adapter continuation flow. **Codex patches:** source preview, not a validated public-adapter auto-resume feature. **Public Claude adapter / Codex hooks:** no promise of automatic continuation. |
+| Cut off mid-task; reasons and rejected approaches get lost | The agent compacts at a natural break, after writing a handoff; a snapshot of the handoff is kept | Claude: yes. Codex hooks: reminders, the host still compacts |
+| The summary drops a detail | Original words and tool results are indexed; fetch them by ID, hash-checked | Yes |
+| Rules stop being followed, or nobody knows who said them | The source is one lookup away. A per-rule record of who said it, when, and whether it still holds | Lookup: yes. Per-rule record: planned |
+| Finished work gets redone | After compaction the agent is told the last request was already handled; the Codex patches drop it from replay | Reminder: yes. Host-level: Codex patches (preview) |
+| An old handoff overrides a newer message | Freshness check before compaction | Yes. Showing messages sent after the snapshot: planned |
+| The agent stops after compaction | `continue` / `wait` chosen when compacting | Planned |
+| Compaction is slow or gets stuck | A host problem. We only keep large tool output in files so there is less to compact | Partial |
 
-Choose a public path by its verified scope:
-
-| Part | Status | Start here |
-|---|---|---|
-| Claude Code adapter | Maintainer's daily use on Windows since late September 2026 | [Claude install](#claude-code) |
-| Codex hooks | Real Codex 0.159.2 host with a loopback mock model, Linux and Windows; not daily use | [Hooks install](#codex-hooks) — no rebuild |
-| Codex patches | Source preview; focused native tests and build evidence; no long real session on this public build | [Patches install](#codex-patches-source-preview) — builds pinned Codex |
+These are tools and prompts, not guarantees: the model can still ignore them. What each part has actually been tested on is under [Details](#details) and in [the verification record](docs/VERIFICATION.md).
 
 ## Results
 
-These are **one maintainer's daily-use observations**, not a controlled benchmark or a guarantee for another installation. Evaluation is in progress; no comparative evaluation result is reported here. The numbers below come from [the verification record](docs/VERIFICATION.md), for the Claude Code adapter, 2026-09-25 through 2026-10-16:
+One maintainer's daily use of the Claude Code adapter, 2026-09-25 to 2026-10-16 (a controlled evaluation is in progress):
 
-- **46 compactions, 45 at a chosen break** (agent-scheduled or user `/compact`); **1 host-forced compaction**.
-- **Median context 379K → 83K tokens**, across **43 measurable compactions**. “Before” is the last model request before the boundary; the host's differently measured `preTokens` median is **206K** for plugin compactions. Roughly **70K** of the after-context is fixed overhead compaction cannot remove.
-- The host-forced case on **October 14 at 860K** was one turn starting at **395K**, with **49 tool calls**, including **37 Read calls**, and no intervening user message. It crossed the **400K / 600K / 800K** thresholds while reminders only ran on `UserPromptSubmit`. Reminders now also run on `PostToolUse`; one was observed inside a tool loop on **October 16**. This addresses the missed reminder path, not every cause of forced compaction.
-- One **September 30** compaction dropped **3 segments**, reducing **602,545 → 498,605 characters**, then collapsed tool round-trips from **579 → 30 messages** and **498,605 → 38,102 characters**, with archived calls/results available by ID.
+- **46 compactions: 45 at a break the agent or user chose, 1 forced by the host.**
+- **Median context 379K → 83K tokens** (43 measurable). About 70K of what remains is fixed overhead.
+- The forced one (Oct 14, 860K) was a single turn of 49 tool calls with no user message, and the reminder only ran when the user spoke. It now also runs after tool calls.
 
 ![Context before and after each compaction, Sep 23 to Oct 16, 2026](docs/img/compactions.svg)
 
-Private Codex overlay observations do not establish results for the public hooks or patches. See the verification record for separately labelled evidence.
+How these were measured, and more: [the verification record](docs/VERIFICATION.md).
 
 ## Install
 
