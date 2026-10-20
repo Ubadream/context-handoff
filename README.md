@@ -1,24 +1,22 @@
 # Context Handoff
 
-Keeps a coding agent on the same task across context compaction.
+Context Handoff keeps a coding agent on the same task across context compaction. It saves a handoff before compaction, hands it back afterward with a note that the last message was already handled, and indexes the original messages so the agent can look up whatever the summary dropped.
 
-Before compaction, the agent writes a handoff. After compaction, it gets that handoff back, is told the last message is not a new request, and can pull up the original words by ID whenever the summary left something out.
-
-Works with Claude Code (in daily use) and Codex (hooks; a patched build as source preview).
+Built for Claude Code (in daily use) and Codex (hooks, plus an optional patched build as a source preview).
 
 ## What it fixes
 
 | Problem | What we do | Status |
 |---|---|---|
-| Cut off mid-task; reasons and rejected approaches get lost | The agent compacts at a natural break, after writing a handoff; a snapshot of the handoff is kept | Claude: yes. Codex hooks: reminders, the host still compacts |
+| Cut off mid-task; reasons and rejected approaches get lost | The agent compacts at a natural break, after writing a handoff; a snapshot of the handoff is kept | Claude Code: yes. Codex hooks: reminders only; the host decides when to compact |
 | The summary drops a detail | Original words and tool results are indexed; fetch them by ID, hash-checked | Yes |
 | Rules stop being followed, or nobody knows who said them | The source is one lookup away. A per-rule record of who said it, when, and whether it still holds | Lookup: yes. Per-rule record: planned |
 | Finished work gets redone | After compaction the agent is told the last request was already handled; the Codex patches drop it from replay | Reminder: yes. Host-level: Codex patches (preview) |
 | An old handoff overrides a newer message | Freshness check before compaction | Yes. Showing messages sent after the snapshot: planned |
 | The agent stops after compaction | `continue` / `wait` chosen when compacting | Planned |
-| Compaction is slow or gets stuck | A host problem. We only keep large tool output in files so there is less to compact | Partial |
+| Compaction is slow or gets stuck | Large tool output is kept in files, so there is less to compact. Stalls inside the host itself are out of reach | Partial |
 
-These are tools and prompts, not guarantees: the model can still ignore them. What each part has actually been tested on is under [Details](#details) and in [the verification record](docs/VERIFICATION.md).
+These are tools and prompts, so a model can still drift. What each part has been tested on: [Details](#details) and [the verification record](docs/VERIFICATION.md).
 
 ## Results
 
@@ -26,7 +24,7 @@ One maintainer's daily use of the Claude Code adapter, 2026-09-25 to 2026-10-16 
 
 - **46 compactions: 45 at a break the agent or user chose, 1 forced by the host.**
 - **Median context 379K → 83K tokens** (43 measurable). About 70K of what remains is fixed overhead.
-- The forced one (Oct 14, 860K) was a single turn of 49 tool calls with no user message, and the reminder only ran when the user spoke. It now also runs after tool calls.
+- The one forced compaction (860K) came during a 49-tool-call turn with no user message, when reminders only ran on user turns. Reminders now also run after tool calls.
 
 ![Context before and after each compaction, Sep 23 to Oct 16, 2026](docs/img/compactions.svg)
 
