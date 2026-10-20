@@ -9,7 +9,7 @@ Built for Claude Code (in daily use) and Codex (hooks, plus an optional patched 
 | Problem | What we do | Status |
 |---|---|---|
 | Cut off mid-task; reasons and rejected approaches get lost | The agent compacts at a natural break, after writing a handoff; a snapshot of the handoff is kept | Claude Code: yes. Codex hooks: reminders only; the host decides when to compact |
-| The summary drops a detail | Original words and tool results are indexed; fetch them by ID, hash-checked | Yes |
+| The summary drops a detail | After compaction, sentences the summary missed are put back automatically, with their time and who said them. Original words and tool results can also be fetched by ID, hash-checked | Claude Code: yes. Codex hooks: yes |
 | Rules stop being followed, or nobody knows who said them | The source is one lookup away. A per-rule record of who said it, when, and whether it still holds | Lookup: yes. Per-rule record: planned |
 | Finished work gets redone | After compaction the agent is told the last request was already handled; the Codex patches drop it from replay | Reminder: yes. Host-level: Codex patches (preview) |
 | An old handoff overrides a newer message | Freshness check before compaction | Yes. Showing messages sent after the snapshot: planned |
@@ -256,7 +256,13 @@ A small standard-library Python component for revisioned handoff drafts, preview
 "CW_MODEL_CMD": "claude -p --model haiku"
 ```
 
-With neither `CW_MODEL_CMD` nor an existing local `wife_l2.py` fallback, saving, segmentation, section retrieval and freshness checks still run without model labels or handoff-gap suggestions. `cw_model.py` selects the explicit command first, then `CW_L2` (default `~/.local/bin/wife_l2.py`) if present; inspect that local helper before assuming the no-model path. This is a command interface, not a verified compatibility matrix for every local or OpenAI-compatible endpoint. It does not include the private ranking-based recovery feature.
+With neither `CW_MODEL_CMD` nor an existing local `wife_l2.py` fallback, saving, segmentation, section retrieval and freshness checks still run without model labels or handoff-gap suggestions. `cw_model.py` selects the explicit command first, then `CW_L2` (default `~/.local/bin/wife_l2.py`) if present; inspect that local helper before assuming the no-model path. This is a command interface, not a verified compatibility matrix for every local or OpenAI-compatible endpoint.
+
+**Recovering what the summary dropped** (`compact_gap`): after a compaction, sentences the summary did not cover are ranked and the top ones are added to the next turn, labelled `user`, `assistant` or `program` with their time. Ranking is pluggable, set in the thresholds file under `claude.compact_gap`: `command` (default, `claude -p --model haiku`, your own Claude login, no key), `openai` (any OpenAI-compatible endpoint: Ollama, LM Studio, llama.cpp or a hosted API; `api_key` names an environment variable) or `none` (word overlap only). If the model fails or times out, it falls back to `none`. Example:
+
+```json
+{"claude":{"compact_gap":{"provider":"openai","base_url":"http://127.0.0.1:11434/v1","api_key":"","model":"your-local-model","timeout":20}}}
+```
 
 Three-part handoffs are optional and off by default. Enable their reminders and advisory source-pointer check with:
 
@@ -290,16 +296,16 @@ Read [docs/VERIFICATION.md](docs/VERIFICATION.md) for dated evidence, measuremen
 - Context can only be rewritten at compaction time; between compactions, only new output can be kept small.
 - The idle reminder has passed tests but has not yet been seen firing after a real idle period.
 - Messages and labels are in Traditional Chinese.
-- Not included from the private setup: recovering summary-dropped sentences with a local ranking model, and the control panel.
+- Not included from the private setup: the control panel.
 - Codex: see the known gaps for the [hooks](#codex-hooks-adapterscodexhooks) and the [patches](#codex-patches-runtime-review) above. Both are tested against a mock model server, not with a real model.
-- Not yet public: ranking-based omitted-sentence recovery, recovered-sentence speaker classification, and the private adapter continue/wait flow (installed privately, live verification pending). A per-rule provenance ledger and explicit post-snapshot message delivery are planned. Optional model suggestions in the public adapter do not provide these features.
+- Not yet public: the continue/wait flow (installed privately, live verification pending). Recovered-sentence ranking has unit tests with mock endpoints; real model services are not yet verified. A per-rule provenance ledger and explicit post-snapshot message delivery are planned. Optional model suggestions in the public adapter do not provide these features.
 - Snapshot freshness and source hashes do not prove that a handoff is complete, that a source statement is true, or that a model follows it. There is no general exactly-once side-effect guarantee.
 - The Claude handoff snapshot was unit-tested and run once on a real session, but had not yet been observed at a real compaction in the recorded verification.
 
 
 ## Privacy
 
-Everything runs locally and is stored as plain text: tool archives, saved originals, handoffs. The Codex hooks keep their state in `$CODEX_HOME/context-handoff/`: byte offsets, hashes and the first 160 characters of each user message; `get` reads the transcript Codex already keeps. The local archive/retrieval path does not require an extra model. Model suggestions use `CW_MODEL_CMD` or the existing `CW_L2` / `wife_l2.py` fallback, if present; those commands may call a remote service. Inspect the model helper selection as well as the state directory. Your coding host's normal model traffic is separate. There is no secret redaction; protect the state directory accordingly.
+Everything runs locally and is stored as plain text: tool archives, saved originals, handoffs. The Codex hooks keep their state in `$CODEX_HOME/context-handoff/`: byte offsets, hashes and the first 160 characters of each user message; `get` reads the transcript Codex already keeps. The local archive/retrieval path does not require an extra model. Model suggestions use `CW_MODEL_CMD` or the existing `CW_L2` / `wife_l2.py` fallback, if present; those commands may call a remote service. Inspect the model helper selection as well as the state directory. Summary-gap recovery sends candidate sentences to the ranking provider you configure (by default your own `claude` CLI); choose `none` to keep them local. Your coding host's normal model traffic is separate. There is no secret redaction; protect the state directory accordingly.
 
 ## License
 
