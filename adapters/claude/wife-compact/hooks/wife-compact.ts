@@ -109,6 +109,20 @@ async function idleSettings($: any): Promise<typeof IDLE_DEFAULT> {
   }
 }
 
+// 交接分三塊（選用，預設關；cw_thresholds.py set --handoff-sections on）。prepare／handoff_check 的 Python 輸出自己帶，
+// 這裡只補外掛自己寫的字：閒置提醒和交接檢查失敗。字面跟 cw_paths.HANDOFF_REMINDER 同一句。
+const HANDOFF_REMINDER = '交接：決策／情感／工作進度，各附原話定位；無則寫無，錯誤入簿。';
+
+async function handoffReminder($: any): Promise<string> {
+  try {
+    await locate($);
+    const on = JSON.parse(await $.fs.read(stateDir('context-workbench/thresholds.json')))?.claude?.handoff_sections === true;
+    return on ? `\n${HANDOFF_REMINDER}` : '';
+  } catch {
+    return '';
+  }
+}
+
 function clearIdle(): void {
   if (idleTimer != null && typeof clearTimeout === 'function') clearTimeout(idleTimer);
   idleTimer = null;
@@ -130,10 +144,11 @@ async function armIdle($: any): Promise<void> {
   if (!cfg.enabled || tokens < cfg.tokens) return;
   const ms = cfg.minutes * 60_000;
   const wan = Math.round(tokens / 10_000);
+  const reminder = await handoffReminder($);
   idleTimer = setTimeout(() => {
     idleTimer = null;
     idleTurn = true;
-    const text = `〔閒置提醒（wife-compact 外掛送的，不是老公）〕老公已經 ${cfg.minutes} 分鐘沒說話，上下文約 ${wan} 萬；提示快取約一小時過期，過期後他回來要全價重讀整份。現在先叫 prepare、把交接寫好讀回；是段落點就排 compact（照判斷選模式）。正在等老公決定的事寫進交接，不要自己往下做；回一兩句就好。`;
+    const text = `〔閒置提醒（wife-compact 外掛送的，不是老公）〕老公已經 ${cfg.minutes} 分鐘沒說話，上下文約 ${wan} 萬；提示快取約一小時過期，過期後他回來要全價重讀整份。現在先叫 prepare、把交接寫好讀回；是段落點就排 compact（照判斷選模式）。正在等老公決定的事寫進交接，不要自己往下做；回一兩句就好。${reminder}`;
     Promise.resolve($.prompt.submit({ text }))
       .then(() => trace($, `閒置提醒已送（約 ${wan} 萬）`))
       .catch((err: unknown) => trace($, `閒置提醒送不出：${errText(err)}`));
@@ -398,7 +413,7 @@ function errText(err: unknown): string {
 }
 
 // 桌面版看不到 $.ui.log，每一步另外寫進檔案，出事時才查得到停在哪
-const VERSION = '0.3.20';
+const VERSION = '0.3.21';
 let traceChain: Promise<void> = Promise.resolve();
 function trace($: any, msg: string): void {
   const line = `${new Date().toISOString()} v${VERSION} ${msg}\n`;
@@ -609,7 +624,7 @@ export const register = (on: any, _options: any) => {
         const mdPath = (await runPython($, 'cw_handoff_check.py', [String(await $.session.id())], 300_000)).trim().split('\n').pop()!.trim();
         return { result: `${await $.fs.read(mdPath.replace(/\\/g, '/'))}\n（存在 ${mdPath}）` };
       } catch (err) {
-        return { result: `交接檢查失敗：${errText(err)}` };
+        return { result: `交接檢查失敗：${errText(err)}${await handoffReminder($)}` };
       }
     }
     if (which === 'advice_reply') {

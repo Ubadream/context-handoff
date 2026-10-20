@@ -101,6 +101,12 @@ def test_reminders_compaction_note_and_originals_in_stock_codex(tmp_path):
         # After compaction: the note names the handoff, says the request is not new, gives an originals ID.
         assert "The conversation was just compacted" in bodies[3]
         assert json.dumps(str(work / "HANDOFF.md"))[1:-1] in bodies[3] and "it is not a new request" in bodies[3]
+        # The handoff as it was at compaction time is kept by content hash and named in the note.
+        snapshot = json.loads((home / "context-handoff" / "handoff-snapshots" / "index.jsonl")
+                              .read_text(encoding="utf-8").splitlines()[-1])
+        blob = home / "context-handoff" / "handoff-snapshots" / "blobs" / f"{snapshot['sha256']}.md"
+        assert blob.read_text(encoding="utf-8") == (work / "HANDOFF.md").read_text(encoding="utf-8")
+        assert json.dumps(str(blob))[1:-1] in bodies[3]
         manifests = list((home / "context-handoff" / "originals").glob("*.json"))
         assert len(manifests) == 1
         ident = manifests[0].stem

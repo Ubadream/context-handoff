@@ -112,6 +112,45 @@ def test_compaction_note_index_and_get(home, tmp_path):
     assert "first request" not in got
 
 
+def test_handoff_snapshot_keeps_each_version_once(home, tmp_path):
+    handoff = tmp_path / "HANDOFF.md"
+    handoff.write_text("first version", encoding="utf-8")
+    path = rollout(tmp_path, user("a request"))
+    hooks.receive(event("PreCompact", path, tmp_path, trigger="manual"))
+    text = context(hooks.receive(event("SessionStart", path, tmp_path, source="compact")))
+    root = home / "context-handoff" / "handoff-snapshots"
+    first = json.loads((root / "index.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    blob = root / "blobs" / f"{first['sha256']}.md"
+    assert str(blob) in text and blob.read_text(encoding="utf-8") == "first version"
+    assert first["session"] == SID and first["trigger"] == "manual" and first["path"] == str(handoff)
+    handoff.write_text("overwritten in place", encoding="utf-8")
+    for _ in range(2):  # the second compaction sees the same content: indexed again, stored once
+        hooks.receive(event("PreCompact", path, tmp_path))
+        hooks.receive(event("SessionStart", path, tmp_path, source="compact"))
+    assert len((root / "index.jsonl").read_text(encoding="utf-8").splitlines()) == 3
+    assert len(list((root / "blobs").iterdir())) == 2 and blob.read_text(encoding="utf-8") == "first version"
+
+
+def test_snapshot_failure_keeps_compaction_bookkeeping(home, tmp_path, monkeypatch):
+    (tmp_path / "HANDOFF.md").write_text("handoff", encoding="utf-8")
+    path = rollout(tmp_path, user("a request"))
+    monkeypatch.setattr(hooks, "snapshot_handoff", lambda *a: (_ for _ in ()).throw(OSError("disk full")))
+    hooks.receive(event("PreCompact", path, tmp_path))
+    text = context(hooks.receive(event("SessionStart", path, tmp_path, source="compact")))
+    assert "Read your handoff" in text and "kept at" not in text and f"{SID[:8]}-1" in text
+
+
+def test_remote_compaction_summary_is_marked_not_blank(home, tmp_path):
+    kept = [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "kept"}]},
+            {"type": "compaction", "encrypted_content": "gAAAA"}]
+    path = rollout(tmp_path, line("compacted", {"message": "", "replacement_history": kept}), user("after it"))
+    hooks.receive(event("PreCompact", path, tmp_path))
+    hooks.receive(event("SessionStart", path, tmp_path, source="compact"))
+    got = hooks.get(f"{SID[:8]}-1§1", 8000)
+    assert "summary encrypted" in got and "1 messages were carried over" in got
+    assert "[summary from an earlier compaction]\n\n" not in got
+
+
 def test_stale_and_missing_handoff(home, tmp_path):
     handoff = tmp_path / "HANDOFF.md"
     handoff.write_text("old")

@@ -12,7 +12,7 @@ import json, os, sys, time
 DEFAULTS = {"remind": [250_000, 400_000, 600_000, 800_000, 900_000], "consider": 400_000, "urgent": 800_000}
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # adapters/claude：共用位置
-from cw_paths import STATE_ROOT, WORKBENCH_STATE  # noqa: E402
+from cw_paths import HANDOFF_REMINDER, STATE_ROOT, WORKBENCH_STATE, handoff_sections  # noqa: E402
 
 THRESHOLDS_FILE = str(WORKBENCH_STATE / "thresholds.json")
 
@@ -87,6 +87,8 @@ def main():
     if event == "PostToolUse":
         tail += "現在在工具迴圈裡：做完手上這一步就是可以停的地方，別一路讀到底才回頭。"
     msg = f"[上下文提醒｜約 {wan} 萬 token，剛跨過 {top // 10_000} 萬。{tail}]"
+    if handoff_sections():
+        msg += "\n" + HANDOFF_REMINDER
     print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": msg}}, ensure_ascii=False))
 
 

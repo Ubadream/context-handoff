@@ -20,11 +20,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import cw_claude  # noqa: E402
 import cw_segments  # noqa: E402
+from cw_paths import HANDOFF_REMINDER, handoff_sections  # noqa: E402
 
 OUT = cw_claude.STATE / "context-workbench" / "handoff-checks"
 HANDOFF_TAIL = 8000  # 給 Jev 看的交接尾巴
 PROMPT_VERSION = "handoff-check-v2"  # v2：同一次呼叫多給「現在要不要壓、用哪種」的建議
 WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+# 開了 handoff_sections（cw_thresholds.py set --handoff-sections on）才加這段；預設照原本五類
+SECTIONS_RULES = ("另外：交接用三塊寫（決策／情感／工作進度）。多列一類 emotion（老婆有感觸處、老公反應與精彩討論），"
+                  "建議寫法依三塊、每條附時間＋原話短句或原文 ID；錯誤只留錯誤簿指向。\n\n")
 
 PROMPT = """老婆（助理）準備壓縮上下文，壓縮後她只剩摘要和交接檔。下面是上一次壓縮之後的對話分段，和交接檔的最後一段。
 請找出**交接裡沒寫到、但壓縮後接著做事會需要的東西**，分五類：
@@ -65,6 +69,27 @@ def load_handoff_bind():
     return mod
 
 
+def format_warnings(text):
+    """三塊與至少一處原話定位的軟檢查；不改新鮮度或壓縮許可。"""
+    headings = set(re.findall(
+        r"^\s*(?:#{1,6}\s*)?(?:\*\*)?(決策|情感|工作進度)(?:\*\*)?"
+        r"(?:[ \t]*[:：].*|[ \t]*(?:[（(].*[）)])?[ \t]*)$", text, re.M))
+    warnings = []
+    missing = [name for name in ("決策", "情感", "工作進度") if name not in headings]
+    if missing:
+        warnings.append("交接缺少標題：" + "／".join(missing))
+    # UUID、段號／節號、明示原文 ID，或同一行的時間與引句。
+    locator = re.search(
+        r"\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b"
+        r"|\b[0-9a-f]{8}#[0-9a-f]{8}\b|\b[\w@.-]+§\d+"
+        r"|原文\s*ID\s*[:：=]\s*[`\"']?[A-Za-z0-9][\w.-]+"
+        r"|(?:\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?|\d{1,2}:\d{2})[^\n]*[「“\"][^」”\"\n]+[」”\"]",
+        text, re.I)
+    if not locator:
+        warnings.append("交接沒有原話定位：補時間＋原話短句或原文 ID")
+    return warnings
+
+
 def facts(path):
     """程式量得到的：交接寫了沒、多新、之後又發生多少事。"""
     written = sorted(load_handoff_bind().written_handoffs(str(path)), key=lambda v: v[1], reverse=True)
@@ -92,7 +117,14 @@ def facts(path):
                     events.append((ts, "edit"))
     latest = written[0] if written else None
     last_write = latest[1] if latest else ""
+    warnings = []
+    if latest and handoff_sections():
+        try:
+            warnings = format_warnings(Path(latest[0]).read_text(encoding="utf-8"))
+        except (OSError, UnicodeError):
+            warnings = ["交接格式未檢查：交接檔無法讀取"]
     return {
+        "format_warnings": warnings,
         "handoffs": [{"path": p, "written_at": cw_claude.local(t)} for p, t in written],
         "last_compaction": cw_claude.local(last_boundary),
         "written_since_compaction": bool(latest and (not last_boundary or last_write > last_boundary)),
@@ -120,7 +152,8 @@ def jev_gaps(path, f, tokens=None):
         handoff_path = f["handoffs"][0]["path"]
         text = Path(handoff_path).read_text(encoding="utf-8", errors="ignore")
         tail = text[-HANDOFF_TAIL:]
-    prompt = PROMPT.format(handoff_path=handoff_path, handoff_tail=tail, tokens=f"{tokens:,} token" if tokens else "不知道",
+    template = PROMPT.replace("【交接檔最後一段】", SECTIONS_RULES + "【交接檔最後一段】") if handoff_sections() else PROMPT
+    prompt = template.format(handoff_path=handoff_path, handoff_tail=tail, tokens=f"{tokens:,} token" if tokens else "不知道",
                            segments="\n\n".join(cw_segments.excerpt(s) for s in segs))
     try:
         text, secs = cw_segments.cw_model.ask(prompt)
@@ -144,6 +177,9 @@ def jev_gaps(path, f, tokens=None):
 
 def markdown(sid8, f, gaps, advice=None):
     lines = [f"# 交接檢查：{sid8}", "", f"**{verdict(f)}**", ""]
+    if handoff_sections():
+        lines += [HANDOFF_REMINDER, ""]
+    lines += [f"- 軟性提醒（不擋壓縮）：{warning}" for warning in f.get("format_warnings", [])]
     if f["handoffs"]:
         lines += [f"- 交接檔：`{h['path']}`（{h['written_at']}）" for h in f["handoffs"]]
     if advice:
@@ -151,7 +187,7 @@ def markdown(sid8, f, gaps, advice=None):
         lines += ["", f"**Jev 對時機與模式的建議**：{now}；模式 {advice.get('mode')}。{advice.get('why') or ''}（只是建議，老婆定）"]
     if gaps is None:
         return "\n".join(lines) + "\n"
-    names = {"decision": "決定／限制", "request": "老公的要求", "done": "做完沒記", "open": "未完／未驗", "next": "下一手"}
+    names = {"decision": "決定／限制", "emotion": "情感", "request": "老公的要求", "done": "做完沒記", "open": "未完／未驗", "next": "下一手"}
     lines += ["", f"## Jev 覺得交接可能漏的（{len(gaps)} 條；只是建議，要不要寫由老婆定）", ""]
     if not gaps:
         lines.append("沒有。")

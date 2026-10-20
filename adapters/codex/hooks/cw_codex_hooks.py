@@ -5,7 +5,8 @@
 One script, registered for four Codex hook events by install_codex_hooks.py:
 
     PostToolUse, UserPromptSubmit   context-size reminders, once per threshold per compaction
-    PreCompact                      remember where the transcript ended and which handoff exists
+    PreCompact                      remember where the transcript ended and which handoff exists,
+                                    and keep a copy of that handoff (handoff-snapshots/, by SHA-256)
     SessionStart (source=compact)   point the agent at its handoff, say the last request is not new,
                                     and index the compacted part of the transcript for later lookup
 
@@ -221,11 +222,41 @@ def before_compact(event: dict) -> dict:
         if b'"user"' in raw and user_text(record) is not None:
             last_user = record.get("timestamp")
     handoff = newest_handoff(event.get("cwd"), settings()["handoff_globs"])
+    try:
+        digest = snapshot_handoff(handoff, event) if handoff else None
+    except OSError as exc:  # a failed copy must not lose the compaction bookkeeping below
+        print(f"context-handoff: handoff snapshot skipped: {exc}", file=sys.stderr)
+        digest = None
     state["pending"] = {"transcript": str(path), "end": end, "last_user": last_user or state.get("last_user"),
                         "handoff": str(handoff) if handoff else None,
-                        "handoff_mtime": handoff.stat().st_mtime if handoff else None}
+                        "handoff_mtime": handoff.stat().st_mtime if handoff else None,
+                        "handoff_sha256": digest}
     write_json(state_path, state)
     return {}
+
+
+def snapshot_handoff(handoff: Path, event: dict) -> str:
+    """Keep the handoff as it was at compaction time.
+
+    Handoff files are overwritten in place, so the version a compaction relied on is otherwise
+    lost. Content goes to handoff-snapshots/blobs/<sha256>.md once per distinct content; every
+    compaction appends a line to handoff-snapshots/index.jsonl.
+    """
+    data = handoff.read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
+    root = state_dir() / "handoff-snapshots"
+    blob = root / "blobs" / f"{digest}.md"
+    if not blob.exists():
+        blob.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=blob.parent, delete=False) as stream:
+            stream.write(data)
+        os.replace(stream.name, blob)
+    row = {"session": event.get("session_id"), "compacted_at": iso(datetime.now().timestamp()),
+           "trigger": event.get("trigger"), "path": str(handoff), "sha256": digest, "bytes": len(data),
+           "mtime": iso(handoff.stat().st_mtime)}
+    with (root / "index.jsonl").open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return digest
 
 
 def index_sections(path: Path, start: int, end: int) -> list[dict]:
@@ -281,6 +312,9 @@ def after_compact(event: dict) -> dict:
                      "may miss that request. Read it, then check the originals below for what came after.")
     else:
         lines.append(f"Read your handoff first: {handoff} (saved after the user's latest message).")
+    if pending.get("handoff_sha256"):
+        copy = state_dir() / "handoff-snapshots" / "blobs" / f"{pending['handoff_sha256']}.md"
+        lines.append(f"The handoff as it was at this compaction is kept at {copy}.")
     lines.append("The last request in the summary was already being worked on; it is not a new request. Continue "
                  "what the handoff lists as unfinished and do not redo finished work.")
     script = Path(__file__).resolve()
@@ -315,7 +349,12 @@ def render(record: dict) -> str | None:
     payload = record.get("payload") or {}
     kind = payload.get("type")
     if record.get("type") == "compacted":
-        return "[summary from an earlier compaction]\n" + str(payload.get("message", ""))[:2000]
+        if message := str(payload.get("message") or ""):
+            return "[summary from an earlier compaction]\n" + message[:2000]
+        # Remote compaction: the summary is an encrypted item only the model provider can read.
+        kept = sum(1 for item in payload.get("replacement_history") or [] if item.get("type") == "message")
+        return (f"[an earlier compaction happened here; the host compacted remotely and keeps its summary "
+                f"encrypted, so it cannot be shown. {kept} messages were carried over verbatim.]")
     if record.get("type") != "response_item":
         return None
     if kind == "message" and payload.get("role") in ("user", "assistant"):

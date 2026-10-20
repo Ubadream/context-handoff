@@ -4,6 +4,7 @@
   python adapters/claude/cw_thresholds.py set [--remind 250000,400000,...] [--consider 400000] [--urgent 800000]
                                               [--auto-compact-window 600000|default]
                                               [--idle on|off] [--idle-tokens 400000] [--idle-minutes 50]
+                                              [--handoff-sections on|off]
 
 三組數字、各自住在宿主真的會讀的地方，這支不另存副本：
   remind／consider／urgent  提醒門檻 → ~/.local/state/wifeos/context-workbench/thresholds.json，
@@ -13,6 +14,7 @@
                             Claude Code 開視窗時讀，改了要重開才生效；default＝拿掉，回到模型自己的上限。
   idle                      閒置提醒 → 同一個 thresholds.json 的 claude.idle；wife-compact 每輪結束時重讀，
                             上下文 ≥ tokens 就排 minutes 分鐘後的提醒（老公先說話就作廢）。改了下一輪就生效。
+  handoff-sections          交接分三塊的提醒與格式軟檢查（選用，預設關）→ 同一個 thresholds.json 的 claude.handoff_sections。
 改 settings.json 前先留一份當天的前像（settings.json.bak-cw-<日期>，同一天只留第一份）。
 輸出一律 JSON：目前值、各自在哪、何時生效。
 """
@@ -31,7 +33,7 @@ from cw_paths import WORKBENCH_STATE  # noqa: E402
 THRESHOLDS = Path(os.environ.get("CW_THRESHOLDS", WORKBENCH_STATE / "thresholds.json"))
 WINDOW_ENV = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
 DEFAULTS = {"remind": [250_000, 400_000, 600_000, 800_000, 900_000], "consider": 400_000, "urgent": 800_000,
-            "idle": {"enabled": True, "tokens": 400_000, "minutes": 50}}
+            "idle": {"enabled": True, "tokens": 400_000, "minutes": 50}, "handoff_sections": False}
 LOW, HIGH = 50_000, 1_000_000  # Claude 目前的模型上限 1M
 
 
@@ -51,6 +53,8 @@ def current():
                    "stored_in": str(THRESHOLDS), "takes_effect": "下一句老公發話（context_watch.py 每次重讀）"},
         "idle": {**DEFAULTS["idle"], **(t.get("idle") or {}), "stored_in": str(THRESHOLDS),
                  "takes_effect": "下一輪結束（wife-compact 每次重讀）", "note": "Claude 提示快取約一小時，minutes 要小於 60 才來得及"},
+        "handoff_sections": {"value": t["handoff_sections"] is True, "stored_in": str(THRESHOLDS),
+                             "takes_effect": "下一次提醒／交接檢查（每次重讀）"},
         "auto_compact_window": {"value": int(window) if window else None, "default_means": "模型自己的上限",
                                 "stored_in": f"{SETTINGS} env.{WINDOW_ENV}", "takes_effect": "重開 Claude 之後"},
     }
@@ -63,7 +67,7 @@ def check(n, what):
 
 
 def set_values(args):
-    if args.remind or args.consider or args.urgent or args.idle or args.idle_tokens or args.idle_minutes:
+    if args.remind or args.consider or args.urgent or args.idle or args.idle_tokens or args.idle_minutes or args.handoff_sections:
         data = load_json(THRESHOLDS, {})
         claude = dict(data.get("claude") or {})  # 只寫這次改的欄位；沒存過的沿用預設、不補寫（面板讀回要逐欄對得上）
         if args.remind:
@@ -83,6 +87,8 @@ def set_values(args):
                     sys.exit("idle-minutes 要在 1～59 之間（快取約一小時）")
                 idle["minutes"] = args.idle_minutes
             claude["idle"] = idle
+        if args.handoff_sections:
+            claude["handoff_sections"] = args.handoff_sections == "on"
         if claude.get("consider", DEFAULTS["consider"]) > claude.get("urgent", DEFAULTS["urgent"]):
             sys.exit(f"consider（{claude.get('consider', DEFAULTS['consider']):,}）不能大於 urgent（{claude.get('urgent', DEFAULTS['urgent']):,}）")
         data["claude"] = claude
@@ -113,6 +119,7 @@ def main():
     s.add_argument("--idle", choices=["on", "off"])
     s.add_argument("--idle-tokens", type=int)
     s.add_argument("--idle-minutes", type=int)
+    s.add_argument("--handoff-sections", choices=["on", "off"], help="交接分三塊（決策／情感／工作進度）的提醒與格式軟檢查")
     args = ap.parse_args()
     if args.cmd == "set":
         set_values(args)

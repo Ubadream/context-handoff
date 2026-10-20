@@ -109,6 +109,7 @@ In daily use since late September 2026. Across the 43 compactions where the resu
 | Handoff check | Before compacting: is the handoff newer than the last user message and file edit? The optional model lists what the handoff may have missed. | |
 | Thresholds and idle reminder | Reminders at configurable context sizes. If the user goes idle with a large context, one reminder before the prompt cache expires asks the agent to write its handoff and compact, so the user doesn't pay to re-read the whole window. | |
 | Fixed-overhead diet | Rarely used tools are deferred and long skill descriptions shortened (switchable). | |
+| Three-part handoffs (optional, off by default) | `cw_thresholds.py set --handoff-sections on`: reminders and the handoff check ask for a handoff in three parts, decisions / feelings / progress, each item with a pointer back to the original words (time and a short quote, or an originals ID), and the check warns, without blocking, when a part or any pointer is missing. This is how the maintainer writes handoffs; it is an example, not a requirement. | |
 
 ## Codex hooks (`adapters/codex/hooks/`)
 
@@ -117,8 +118,8 @@ In daily use since late September 2026. Across the 43 compactions where the resu
 | Hook | What it does |
 |---|---|
 | PostToolUse, UserPromptSubmit | Context-size reminders, once per threshold until the next compaction. Default: at 60% of the model's context window, update the handoff at the next natural break; at 80%, save it now and tell the user it is a good point to run `/compact`. |
-| PreCompact | Records where the transcript ended, which handoff file is newest in the working directory, and when the user last spoke. |
-| SessionStart (compact) | Tells the agent which handoff to read first, and whether it was saved before or after the user's latest message; says the last request in the summary is not a new one; points to an index of the part that was just compacted. |
+| PreCompact | Records where the transcript ended, which handoff file is newest in the working directory, and when the user last spoke. Keeps a copy of that handoff as it is at this moment (`context-handoff/handoff-snapshots/`, stored once per SHA-256, one index line per compaction), since handoff files are overwritten in place. |
+| SessionStart (compact) | Tells the agent which handoff to read first, and whether it was saved before or after the user's latest message; says the last request in the summary is not a new one; names the saved copy; points to an index of the part that was just compacted. |
 | (command) | `list <ID>` and `get <ID>§N` read a section of the compacted transcript back, split at each user message, after checking its SHA-256 against the index. |
 
 **What hooks cannot do, compared with the patches:**
@@ -141,6 +142,7 @@ In daily use since late September 2026. Across the 43 compactions where the resu
 **Known gaps:**
 
 - Hook events carry no token counts, and Codex writes them to the transcript asynchronously, so a reminder arrives one tool call after the threshold is crossed. Keep the last threshold well below the host's automatic-compaction limit.
+- With remote compaction, the host's summary is stored encrypted and only the model provider can read it. `get` marks where such a compaction happened and how many messages were carried over, instead of showing an empty summary. Your handoff, its saved copy and the indexed originals are what stays readable.
 - Not yet used in long real sessions. The maintainer's daily Codex runs the private overlay, which has its own hooks.
 - macOS untested.
 
