@@ -30,9 +30,9 @@ from pathlib import Path
 
 HOOK = Path(__file__).resolve().parent / "hooks" / "cw_codex_hooks.py"
 BEGIN, END = "# BEGIN context-handoff hooks", "# END context-handoff hooks"
-EVENTS = [("PostToolUse", None, 10, None), ("UserPromptSubmit", None, 10, None),
+EVENTS = [("PostToolUse", None, 10, None), ("UserPromptSubmit", None, 40, None),
           ("PreCompact", "auto|manual", 60, "Saving the compaction point"),
-          ("SessionStart", "compact", 60, "Indexing the compacted transcript")]
+          ("SessionStart", "compact", 90, "Indexing the compacted transcript")]
 
 
 def codex_home() -> Path:

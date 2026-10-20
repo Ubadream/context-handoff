@@ -47,7 +47,7 @@ HOOKS = [
     ("PostToolUse", "", "cw_advice.py", "hook", 10),
     ("UserPromptSubmit", "", "cw_advice.py", "hook", 10),
 ]
-# 公開版沒帶 compact_gap（要本機排序模型）和 cw_advice（要 Codex 那邊的 core）：腳本不在就不掛
+# Optional scripts absent from this checkout are not registered.
 HOOKS = [h for h in HOOKS if (HERE / h[2]).exists()]
 ENV = {"CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1",
        "CW_WORKBENCH": HERE.parents[1].as_posix(),  # 外掛靠這兩個找倉庫和 Python，不寫死路徑
@@ -87,11 +87,11 @@ def other_matcher(settings, event, matcher, script):
 
 def check_hooks(settings):
     rows = []
-    for event, matcher, script, arg, _ in HOOKS:
+    for event, matcher, script, arg, timeout in HOOKS:
         want = command(script, arg)
         got = find(settings, event, matcher, script) or [
             h for g in other_matcher(settings, event, matcher, script) for h in g["hooks"]]
-        state = ("ok" if any(h["command"] == want for h in got) else
+        state = ("ok" if any(h["command"] == want and h.get("timeout", 0) >= timeout for h in got) else
                  "別處" if got else "沒接")
         rows.append((state, f"{event}{f'[{matcher}]' if matcher else ''} {Path(script).name}{' ' + arg if arg else ''}",
                      got[0]["command"] if got and state != "ok" else ""))
@@ -110,6 +110,7 @@ def fix_hooks(settings):
         if got:
             for h in got:  # 同一個腳本掛兩次就只留第一個
                 h["command"] = want
+                h["timeout"] = timeout
             for g in hooks[event]:
                 if (g.get("matcher") or "") == matcher:
                     seen, keep = False, []
@@ -187,9 +188,22 @@ def doctor():
         bad += state == "舊版"
         print(f"  {state:4} {name}" + ("（還是搬家前的全文，會跟倉庫分岔）" if state == "舊版" else ""))
     print("外部依賴")
-    for name, p in [("wife_recall.py（compact_gap 找原話）", Path.home() / ".local" / "bin" / "wife_recall.py")]:
-        if (HOOKS_DIR / "compact_gap.py").exists():
-            print(f"  {'ok' if p.exists() else '缺':4} {name}")
+    import cw_gap_model
+    try:
+        config = cw_gap_model.settings()
+        provider = cw_gap_model.check(config)
+        print(f"  compact_gap provider={provider}; optional embeddings={config['embedding'].get('provider', 'none')}")
+        if provider == "command":
+            cmd = os.environ.get("CW_MODEL_CMD") or config["command"]
+            import shlex
+            executable = shlex.split(cmd, posix=False)[0].strip('"')
+            print(f"  {'ok' if shutil.which(executable) else '缺':4} ranking command (failure falls back to none)")
+        if provider == "openai":
+            key_env = config.get("api_key", "")
+            print(f"  ranking model={config['model']}; credential env={'set' if os.environ.get(key_env) else 'unset/local anonymous'}")
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        bad += 1
+        print("  invalid compact_gap settings (runtime falls back to none)")
     import cw_model
     print(f"  資訊 分段／交接建議用的模型：{cw_model.name() or '沒有（只切段、不附建議；要的話設 CW_MODEL_CMD）'}")
     for tool in ("node", "claude"):

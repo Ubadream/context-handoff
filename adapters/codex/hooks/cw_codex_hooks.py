@@ -324,17 +324,38 @@ def after_compact(event: dict) -> dict:
     return {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": " ".join(lines)}}
 
 
+def gap_response(event: dict) -> dict:
+    import importlib.util
+    path = Path(__file__).resolve().parents[2] / "claude" / "hooks" / "compact_gap.py"
+    spec = importlib.util.spec_from_file_location("context_handoff_gap", path)
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+        return module.receive(event)
+    except (OSError, ValueError, TypeError, KeyError):
+        # The existing handoff and originals index remain available if gap recovery fails.
+        print("context-handoff: gap recovery unavailable", file=sys.stderr)
+        return {}
+
+
 def receive(event: dict) -> dict:
     if event.get("agent_id") or event.get("subagent"):
         return {}
     name = event.get("hook_event_name")
-    if name in ("PostToolUse", "UserPromptSubmit"):
-        return remind(event)
     if name == "PreCompact":
         return before_compact(event)
-    if name == "SessionStart" and event.get("source") == "compact":
-        return after_compact(event)
-    return {}
+    result = {}
+    if name in ("PostToolUse", "UserPromptSubmit"):
+        result = remind(event)
+    elif name == "SessionStart" and event.get("source") == "compact":
+        result = after_compact(event)
+    if name == "UserPromptSubmit" or name == "SessionStart" and event.get("source") == "compact":
+        extra = gap_response(event)
+        if extra.get("hookSpecificOutput"):
+            context = result.get("hookSpecificOutput", {}).get("additionalContext", "")
+            extra["hookSpecificOutput"]["additionalContext"] = context + "\n" + extra["hookSpecificOutput"]["additionalContext"]
+        result.update(extra)
+    return result
 
 
 # ---- reading originals back -------------------------------------------------------------------
