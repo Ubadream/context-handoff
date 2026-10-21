@@ -10,7 +10,9 @@
 // 函式 hook 是 early access：需要 CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1。
 
 type Mode = 'A' | 'C';
-type Pending = { mode: Mode; reason: string; keep: string; drop: string[] };
+type HandoffIds = { entry: string; sidecar: string };
+type Continuation = { epoch: number; queued?: boolean };
+type Pending = { mode: Mode; reason: string; keep: string; drop: string[]; next: 'continue' | 'wait'; handoffIds?: HandoffIds; initiated?: boolean; promptEpoch?: number; continuation?: Continuation };
 
 // C：留在上下文裡的逐字尾巴。0＝不留：內建摘要本來就逐字列老公的話、內建也保留最後幾則（0925 老公抓到重複）
 const TAIL_CHARS = 0;
@@ -39,6 +41,9 @@ const RETRIEVE_NOTE =
 
 let pending: Pending | null = null; // 排定的模式，session.compact 取用後清掉
 let requested = false; // 這一輪結束要不要由老婆發起
+let promptEpoch = 0; // 壓縮期間或排程送出前有新輸入，就讓那則輸入接手。
+let continuation: Continuation | null = null;
+const CONTINUE_PROMPT = '〔wife-compact：壓縮完成，續作〕這是外掛提示，不是老公的新要求。讀交接，從「下一步」接著做；只續做已授權未完的工作，等老公決定的事仍等待。壓縮前老公最後一句不是新要求，已做完的不要重做。';
 const toolSizes = new Map<string, { chars: number; deferred: boolean; provider: string }>(); // tool.describe 量到的說明長度
 const attachSizes = new Map<string, { count: number; chars: number; last: number }>(); // prompt.attachment 各類附件的次數與字數
 const toolNames: Record<string, string> = {}; // 名稱 → 宿主給的完整工具名（mcp__wife-compact__…）
@@ -51,6 +56,7 @@ const DESCRIPTION = [
   '交接：上一次壓縮後沒寫過交接會被擋（除非給 no_handoff_reason）；壓前可以先叫 handoff_check 看 Jev 列的漏項再補。',
   'drop：想順便移出沒用的段，先叫 segments 工具看 Jev 的建議表，對照後把要移出的段號放進 drop（或 ["suggested"] 照建議全部移出）；老公開頭的段會留他的原話一行，其餘整段移出、原文用 get 找回。',
   'keep：要摘要特別保留的東西（檔案、決定、未完成事項），A／C 會交給摘要器。',
+  'next：交接裡有已授權未完的工作選 continue，壓縮完成後外掛會送續作提示；收工或正在等老公決定選 wait（預設，相容舊呼叫）。',
 ].join('\n');
 
 // 延後載入的工具：少用、說明長。常用的（Bash、Read、Edit、Write、Grep、Glob、Agent、Skill、AskUserQuestion、ToolSearch）留在前面
@@ -148,7 +154,7 @@ async function armIdle($: any): Promise<void> {
   idleTimer = setTimeout(() => {
     idleTimer = null;
     idleTurn = true;
-    const text = `〔閒置提醒（wife-compact 外掛送的，不是老公）〕老公已經 ${cfg.minutes} 分鐘沒說話，上下文約 ${wan} 萬；提示快取約一小時過期，過期後他回來要全價重讀整份。現在先叫 prepare、把交接寫好讀回；是段落點就排 compact（照判斷選模式）。正在等老公決定的事寫進交接，不要自己往下做；回一兩句就好。${reminder}`;
+    const text = `〔wife-compact：閒置提醒〕外掛送的，不是老公。老公已經 ${cfg.minutes} 分鐘沒說話，上下文約 ${wan} 萬；提示快取約一小時過期，過期後他回來要全價重讀整份。現在先叫 prepare、把交接寫好讀回；是段落點就排 compact（照判斷選模式）。正在等老公決定的事寫進交接，不要自己往下做；回一兩句就好。${reminder}`;
     Promise.resolve($.prompt.submit({ text }))
       .then(() => trace($, `閒置提醒已送（約 ${wan} 萬）`))
       .catch((err: unknown) => trace($, `閒置提醒送不出：${errText(err)}`));
@@ -250,6 +256,39 @@ async function runPython($: any, script: string, args: string[], timeoutMs: numb
   const r = await $.process.run([at.python, '-X', 'utf8', `${at.workbench}/adapters/claude/${script}`, ...args], { cwd: at.workbench, timeoutMs });
   if (r.exitCode !== 0) throw new Error(`${script} 結束碼 ${r.exitCode}：${String(r.stderr || r.stdout).slice(-600)}`);
   return String(r.stdout);
+}
+
+// 原文範圍同步存；快照只交給背景入口。兩段失敗都不能擋壓縮，也不重試。
+async function prepareHandoffIds($: any, facts: any): Promise<{ ids?: HandoffIds; note: string }> {
+  const session = facts?.session_file;
+  const handoff = facts?.handoffs?.[0]?.path;
+  if (!facts?.written_since_compaction || !session || !handoff) return { note: '' };
+  try {
+    // 交接原文 ID 由外部記憶庫提供；沒設入口就不做（公開版沒有預設路徑）
+    const entry = await $.env.get('WM_HANDOFF_IDS_ENTRY');
+    if (!entry || !await $.fs.exists(entry)) return { note: '' };
+    const r = await $.process.run([at.python, '-X', 'utf8', entry, 'prepare', '--session-file', session, '--handoff', handoff],
+      { cwd: at.workbench, timeoutMs: 15_000 });
+    if (r.exitCode !== 0) throw new Error(`exit ${r.exitCode}：${String(r.stderr || r.stdout).slice(-600)}`);
+    const sidecar = String(r.stdout).trim().split(/\r?\n/).pop()!.trim();
+    if (sidecar === 'DISABLED') return { note: '' };
+    if (!sidecar || !await $.fs.exists(sidecar)) throw new Error('入口沒有回傳存在的 sidecar 路徑');
+    return { ids: { entry, sidecar }, note: `\n原文範圍已存：${sidecar}\n` };
+  } catch (err) {
+    return { note: `\n軟性提醒（不擋壓縮）：原文範圍沒存成（${errText(err).replace(/\s+/g, ' ')}）。\n` };
+  }
+}
+
+async function spawnHandoffSnapshot($: any, ids: HandoffIds): Promise<void> {
+  try {
+    const r = await $.process.run([at.python, '-X', 'utf8', ids.entry, 'spawn-snapshot', '--sidecar', ids.sidecar],
+      { cwd: at.workbench, timeoutMs: 10_000 });
+    if (r.exitCode !== 0) throw new Error(`exit ${r.exitCode}：${String(r.stderr || r.stdout).slice(-600)}`);
+    const output = String(r.stdout).trim();
+    trace($, output === 'DISABLED' ? 'handoff_ids spawn-snapshot DISABLED' : `handoff_ids spawn-snapshot 已交出：${output}`);
+  } catch (err) {
+    trace($, `handoff_ids spawn-snapshot 失敗（不影響壓縮）：${errText(err)}`);
+  }
 }
 
 async function latestSegments($: any): Promise<{ path: string; segs: Seg[] } | null> {
@@ -413,7 +452,7 @@ function errText(err: unknown): string {
 }
 
 // 桌面版看不到 $.ui.log，每一步另外寫進檔案，出事時才查得到停在哪
-const VERSION = '0.3.21';
+const VERSION = '0.3.23';
 let traceChain: Promise<void> = Promise.resolve();
 function trace($: any, msg: string): void {
   const line = `${new Date().toISOString()} v${VERSION} ${msg}\n`;
@@ -439,15 +478,60 @@ function oneLine(text: string): string {
   return text.replace(/\s*\n\s*/g, '；');
 }
 
+function queueContinuation($: any, ticket?: Continuation): void {
+  if (!ticket || ticket.queued || continuation !== ticket) return;
+  ticket.queued = true;
+  // 由宿主壓縮呼叫完成的回呼排送；手動 /compact 才從 hook 延後送。
+  // 不 await prompt.submit（它可能要等這一輪閒下來），也不在失敗後重送。
+  try {
+    $.clock.after(1000, () => {
+      if (continuation !== ticket || promptEpoch !== ticket.epoch) {
+        if (continuation === ticket) continuation = null;
+        trace($, '續作已取消：有新輸入、取消或另一次壓縮');
+        return;
+      }
+      continuation = null; // 送之前消耗票，同一壓縮最多嘗試一次，包括失敗。
+      clearIdle();
+      Promise.resolve().then(async () => {
+        if (promptEpoch !== ticket.epoch) {
+          trace($, '續作已取消：送出前有新輸入');
+          return;
+        }
+        await $.prompt.submit({ text: CONTINUE_PROMPT });
+        trace($, '壓縮後續作提示已送出');
+      })
+        .catch((err: unknown) => trace($, `壓縮後續作提示送不出：${errText(err)}`));
+    });
+  } catch (err) {
+    if (continuation === ticket) continuation = null;
+    trace($, `壓縮後續作排程失敗：${errText(err)}`);
+  }
+}
+
+function compactFinished($: any, p: Pending, ticket: Continuation | null, result: any): void {
+  if (!ticket) return;
+  if (!result?.messages?.length || result.skip) {
+    if (continuation === ticket) continuation = null;
+    return;
+  }
+  p.continuation = ticket;
+  if (!p.initiated) queueContinuation($, ticket);
+}
+
 // 發起壓縮。互動式 session 可以直接 $.session.compact；桌面版／SDK 不行
 // （「compaction here runs inside a turn (a /compact prompt)」），就排一個 /compact 提示，
 // 等 session 閒下來送出。不能 await：它要等閒下來才 resolve，而這個 hook 還沒結束。
 // 排定的模式留在 pending，由 session.compact hook 取用。
 async function startCompact($: any, p: Pending): Promise<void> {
   trace($, `startCompact ${p.mode}`);
+  p.initiated = true;
+  p.promptEpoch = promptEpoch;
   try {
     const { skip } = (await $.session.compact({ instructions: instructionsFor(p) })) ?? {};
-    if (skip) say($, `wife-compact: 壓縮被略過：${skip}`);
+    if (skip) {
+      if (continuation === p.continuation) continuation = null;
+      say($, `wife-compact: 壓縮被略過：${skip}`);
+    } else queueContinuation($, p.continuation);
     return;
   } catch (err) {
     trace($, `session.compact 不行：${errText(err)}；改用 command.run 送 compact`);
@@ -456,8 +540,12 @@ async function startCompact($: any, p: Pending): Promise<void> {
   // 所以延一秒，離開這個 hook 再叫
   $.clock.after(1000, () => {
     $.command.run({ command: 'compact', args: oneLine(instructionsFor(p)) }).then(
-      () => trace($, 'command.run compact 已送出'),
+      () => {
+        trace($, 'command.run compact 已送出');
+        queueContinuation($, p.continuation);
+      },
       (err: unknown) => {
+        if (continuation === p.continuation) continuation = null;
         say($, `wife-compact: command.run compact 也不行（${errText(err)}）；排定保留，老公打 /compact 時照樣套用`);
         try {
           $.ui.toast(`wife-compact：自己壓不了，排定的 ${p.mode} 會在你打 /compact 時套用`);
@@ -496,6 +584,7 @@ export const register = (on: any, _options: any) => {
           type: 'object',
           properties: {
             mode: { type: 'string', enum: ['A', 'C', 'cancel'] },
+            next: { type: 'string', enum: ['continue', 'wait'], default: 'wait', description: '交接有已授權未完工作選 continue；收工或等老公決定選 wait（預設）' },
             reason: { type: 'string', description: '為什麼現在壓、為什麼用這種' },
             keep: { type: 'string', description: '摘要要特別保留的東西（可省略）' },
             drop: { type: 'array', items: { type: 'string' }, description: '壓縮時要移出的段號（先用 segments 工具看清單）；["suggested"]＝照 Jev 建議全部移出。省略＝不移出任何段' },
@@ -653,9 +742,12 @@ export const register = (on: any, _options: any) => {
       const had = pending;
       pending = null;
       requested = false;
+      continuation = null;
       return { result: had ? `已取消（原本排定 ${had.mode}）。` : '沒有排定的壓縮。' };
     }
     if (mode !== 'A' && mode !== 'C') return { deny: 'mode 要是 A、C 或 cancel（B 整段逐字 0930 已拿掉，要細節用 C）' };
+    const after = e.next ?? 'wait';
+    if (after !== 'continue' && after !== 'wait') return { deny: 'next 要是 continue 或 wait' };
     let drop: string[] = [];
     let dropNote = '';
     const asked = Array.isArray(e.drop) ? e.drop.map(String) : [];
@@ -674,6 +766,7 @@ export const register = (on: any, _options: any) => {
     }
     // 交接新鮮度：只跑程式那段（幾秒）。上一次壓縮後沒寫過交接又沒給理由就擋；其餘只把事實帶給老婆看
     let handoffNote = '';
+    let handoffIds: HandoffIds | undefined;
     try {
       const check = JSON.parse(await runPython($, 'cw_handoff_check.py', [String(await $.session.id()), '--no-model', '--json'], 60_000));
       const reason = String(e.no_handoff_reason ?? '').trim();
@@ -681,16 +774,24 @@ export const register = (on: any, _options: any) => {
         return { deny: `${check.verdict}先寫交接（可以先叫 handoff_check 看 Jev 列的漏項），或在 no_handoff_reason 說明為什麼不用。` };
       }
       handoffNote = reason && !check.facts?.written_since_compaction ? `沒寫交接的理由：${reason}。` : `交接：${check.verdict}`;
+      const warnings = check.facts?.format_warnings ?? [];
+      if (warnings.length) handoffNote += `\n軟性提醒（不擋壓縮）：${warnings.join('；')}。\n`;
+      const prepared = await prepareHandoffIds($, check.facts);
+      handoffIds = prepared.ids;
+      handoffNote += prepared.note;
     } catch (err) {
       handoffNote = `（交接檢查沒跑成：${errText(err)}）`;
     }
-    pending = { mode, reason: String(e.reason ?? ''), keep: String(e.keep ?? ''), drop };
+    continuation = null;
+    pending = { mode, reason: String(e.reason ?? ''), keep: String(e.keep ?? ''), drop, next: after, handoffIds };
     requested = true;
-    return { result: `已排定：這一輪回完話用 ${mode} 壓縮。${dropNote}${handoffNote}記得在這則回覆裡跟老公說；他說不要就用 mode=cancel。` };
+    return { result: `已排定：這一輪回完話用 ${mode} 壓縮；壓後${after === 'continue' ? '續做已授權未完的工作' : '等待老公'}。${dropNote}${handoffNote}記得在這則回覆裡跟老公說；他說不要就用 mode=cancel。${await handoffReminder($)}` };
   });
 
   on('prompt.submit', async ($: any, e: any, next: any) => {
     clearIdle(); // 有人說話了，閒置提醒作廢
+    promptEpoch++; // 保守地讓任何新輸入（包含其他外掛）接手，不與它重複開回合。
+    continuation = null;
     return next(e);
   });
 
@@ -699,7 +800,7 @@ export const register = (on: any, _options: any) => {
     if (!e.agentId && idleTurn) {
       idleTurn = false;
       trace($, '閒置提醒那一輪回完，不重排；等老公說話');
-    } else if (!e.agentId && !pending) await armIdle($);
+    } else if (!e.agentId && !pending && !continuation) await armIdle($);
     if (!requested || !pending || e.agentId || e.reason !== 'answer') return result;
     trace($, `turn.complete 發起 ${pending.mode}`);
     requested = false; // 只發起一次；pending 留著給 session.compact
@@ -709,8 +810,12 @@ export const register = (on: any, _options: any) => {
 
   on('session.compact', async ($: any, e: any, next: any) => {
     trace($, `session.compact trigger=${e.trigger} pending=${pending?.mode ?? '-'} agentId=${e.agentId ?? '-'} messages=${e.messages?.length} instructions=${(e.instructions ?? '').length}`);
+    if (!e.agentId && e.trigger !== 'precompute') continuation = null;
     if (!pending || e.agentId || e.trigger === 'precompute') return next(e);
     const p = pending;
+    const ticket = p.next === 'continue' ? { epoch: p.promptEpoch ?? promptEpoch } : null;
+    continuation = ticket;
+    clearIdle();
     pending = null;
     requested = false;
     try {
@@ -731,13 +836,24 @@ export const register = (on: any, _options: any) => {
       if (p.mode === 'C') res = await summaryPlusRecent($, withInstructions(lined, p), next, p);
       else res = await next(withInstructions(lined, p));
       trace($, `session.compact ${p.mode} 完成 messages=${res?.messages?.length ?? '-'} skip=${res?.skip ?? '-'}`);
+      if (p.handoffIds && res?.messages && !res.skip) await spawnHandoffSnapshot($, p.handoffIds);
+      compactFinished($, p, ticket, res);
       try {
         $.ui.toast(`wife-compact：已用 ${p.mode} 壓縮（${p.reason}）`);
       } catch {}
       return res;
     } catch (err) {
       say($, `wife-compact: ${p.mode} 失敗，交回內建：${errText(err)}`);
-      return next(e);
+      let res: any;
+      try {
+        res = await next(e);
+      } catch (failure) {
+        if (continuation === ticket) continuation = null;
+        throw failure;
+      }
+      if (p.handoffIds && res?.messages && !res.skip) await spawnHandoffSnapshot($, p.handoffIds);
+      compactFinished($, p, ticket, res);
+      return res;
     }
   });
 };
