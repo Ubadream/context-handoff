@@ -26,6 +26,8 @@ Run [37783812942](https://github.com/Ubadream/context-handoff/actions/runs/37783
 
 `claude-adapter` installs the pinned `pytest==8.4.2` from PyPI into a throwaway virtual environment and runs `tests/claude` against synthetic data, with state redirected to the runner's temp directory. It does not install Claude Code, run function hooks, call a model or touch a real `~/.claude`. A green job covers the adapter's Python logic only, not a live Claude Code session.
 
+Since 2026-10-21 the same job also sets up Node 24 (`actions/setup-node`, pinned by commit) and runs the wife-compact plugin's own tests (`continue`, `handoff_ids`, `nesting`, `tools`). They load the plugin's TypeScript directly against a simulated host object; they do not run Claude Code or its function-hook runtime.
+
 ## Prepared handoffs (branch `codex-prepare-unix`, 2026-10-09)
 
 The native job also applies `runtime-review-v2/patches/0004-Open-prepared-handoffs.patch`, which opens prepared handoffs on Unix and Windows, and runs the previously ignored prepare-dependent tests on Linux. One of them, the deny-read test, is still ignored: on this runner Codex's filesystem sandbox helper aborts (SIGABRT) while loading AGENTS.md, before the turn reaches prepare, and allowing unprivileged user namespaces did not change that. An informational step runs it with `--ignored` next to upstream's own deny-read test as a control; both results are printed and do not fail the job. Windows behaviour is not exercised by this workflow; it was tested on the maintainer's Windows machine.

@@ -124,6 +124,7 @@ def facts(path):
         except (OSError, UnicodeError):
             warnings = ["交接格式未檢查：交接檔無法讀取"]
     return {
+        "session_file": str(Path(path).resolve()),
         "format_warnings": warnings,
         "handoffs": [{"path": p, "written_at": cw_claude.local(t)} for p, t in written],
         "last_compaction": cw_claude.local(last_boundary),

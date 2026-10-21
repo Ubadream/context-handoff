@@ -34,6 +34,15 @@ jobs:
           python3 -m venv .venv
           .venv/bin/python -m pip install --quiet pytest==8.4.2
           CW_STATE_ROOT="$RUNNER_TEMP/cw-state" .venv/bin/python -m pytest -q tests/claude tests/codex
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24  # tests import the plugin's .ts directly (type stripping)
+      - name: wife-compact plugin tests (simulated host; continue/wait, handoff IDs, nesting, tool lines)
+        run: |
+          node --version
+          for t in continue handoff_ids nesting tools; do
+            CW_TEST_PYTHON=python3 node "adapters/claude/wife-compact/tests/$t.mjs"
+          done
   codex-hooks:
     strategy:
       fail-fast: false

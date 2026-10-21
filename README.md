@@ -13,7 +13,7 @@ Built for Claude Code (in daily use) and Codex (hooks, plus an optional patched 
 | Rules stop being followed, or nobody knows who said them | The source is one lookup away. A per-rule record of who said it, when, and whether it still holds | Lookup: yes. Per-rule record: planned |
 | Finished work gets redone | After compaction the agent is told the last request was already handled; the Codex patches drop it from replay | Reminder: yes. Host-level: Codex patches (preview) |
 | An old handoff overrides a newer message | Freshness check before compaction | Yes. Showing messages sent after the snapshot: planned |
-| The agent stops after compaction | `continue` / `wait` chosen when compacting | Planned |
+| The agent stops after compaction | The agent chooses `continue` or `wait` when it schedules compaction; with `continue` the plugin sends one labelled prompt afterwards to resume authorised work | Claude Code: yes. Codex: patches (preview) |
 | Compaction is slow or gets stuck | Large tool output is kept in files, so there is less to compact. Stalls inside the host itself are out of reach | Partial |
 
 These are tools and prompts, so a model can still drift. What each part has been tested on: [Details](#details) and [the verification record](docs/VERIFICATION.md).
@@ -173,6 +173,7 @@ The measured daily-use observations are in [Results](#results); individual mecha
 | Feature | What it does | Measured on a real session |
 |---|---|---|
 | Agent-chosen compaction | A `compact` tool lets the agent schedule compaction at a natural break, after updating its handoff, in mode A or C. Compaction is blocked if no handoff was written since the last one, unless the agent gives a reason. | |
+| Continue or wait | `compact` takes `next`: `continue` when authorised work is unfinished, `wait` when a user decision is pending. With `continue`, once compaction finishes the plugin submits one prompt, explicitly labelled as coming from the plugin and not the user: read the handoff, resume, don't redo finished work. At most once per compaction; if the user types first, the user's message wins. Plugin prompts are never recovered as the user's words. | Resumed without a user message after 3 real compactions (2026-10-20 to 10-21). In a calibration run of the controlled evaluation (Claude Haiku, toy project), the plugin arm resumed and finished the task, 8/8 tests; the arm without the plugin stopped after compaction. |
 | Tool round-trips to one line | At compaction every tool call becomes one line with an ID; the full call and result are archived locally and `get <id>` brings them back. | 579 messages → 30, 498,605 → 38,102 characters (one compaction, 2026-09-30) |
 | Segment and drop | The conversation is split at each user message. An optional model labels each segment and suggests which are finished; the agent confirms which to drop. The user's own words in dropped segments are kept; the rest is retrievable by segment ID. | 3 segments dropped: 602,545 → 498,605 characters (same compaction) |
 | Large output kept out of context | A PostToolUse hook saves large Bash/PowerShell, Grep, WebFetch/WebSearch and browser page-text output to a file and keeps head + tail + path. Large `Read` results keep only the first lines with correct line numbers and say where to continue. | a 37,322-character Grep result → about 3,500 |
@@ -298,9 +299,9 @@ Read [docs/VERIFICATION.md](docs/VERIFICATION.md) for dated evidence, measuremen
 - Messages and labels are in Traditional Chinese.
 - Not included from the private setup: the control panel.
 - Codex: see the known gaps for the [hooks](#codex-hooks-adapterscodexhooks) and the [patches](#codex-patches-runtime-review) above. Both are tested against a mock model server, not with a real model.
-- Not yet public: the continue/wait flow (installed privately, live verification pending). Recovered-sentence ranking has unit tests with mock endpoints; real model services are not yet verified. A per-rule provenance ledger and explicit post-snapshot message delivery are planned. Optional model suggestions in the public adapter do not provide these features.
+- Continue/wait: the resume prompt is an instruction to the model, so whether it resumes the right work, and stops when it should wait, still depends on the model; the controlled evaluation measuring this is still running. Recovered-sentence ranking has unit tests with mock endpoints; real model services are not yet verified. A per-rule provenance ledger and explicit post-snapshot message delivery are planned. Optional model suggestions in the public adapter do not provide these features.
 - Snapshot freshness and source hashes do not prove that a handoff is complete, that a source statement is true, or that a model follows it. There is no general exactly-once side-effect guarantee.
-- The Claude handoff snapshot was unit-tested and run once on a real session, but had not yet been observed at a real compaction in the recorded verification.
+- Claude handoff snapshots have since been recorded at real compactions (45 snapshots at 24 compactions in 7 sessions, 2026-10-16 to 10-21); a snapshot proves what the handoff said at that moment, not that it was right.
 
 
 ## Privacy
