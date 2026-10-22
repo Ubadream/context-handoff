@@ -26,7 +26,7 @@ Run [37783812942](https://github.com/Ubadream/context-handoff/actions/runs/37783
 
 `claude-adapter` installs the pinned `pytest==8.4.2` from PyPI into a throwaway virtual environment and runs `tests/claude` against synthetic data, with state redirected to the runner's temp directory. It does not install Claude Code, run function hooks, call a model or touch a real `~/.claude`. A green job covers the adapter's Python logic only, not a live Claude Code session.
 
-Since 2026-10-21 the same job also sets up Node 24 (`actions/setup-node`, pinned by commit) and runs the wife-compact plugin's own tests (`continue`, `handoff_ids`, `nesting`, `tools`). They load the plugin's TypeScript directly against a simulated host object; they do not run Claude Code or its function-hook runtime.
+Since 2026-10-21 the same job also sets up Node 24 (`actions/setup-node`, pinned by commit) and runs the wife-compact plugin's own tests (`continue`, `handoff_ids`, `nesting`, `tools`, `language`). They load the plugin's TypeScript directly against a simulated host object; they do not run Claude Code or its function-hook runtime.
 
 ## Prepared handoffs (branch `codex-prepare-unix`, 2026-10-09)
 

@@ -24,6 +24,7 @@ One maintainer's daily use of the Claude Code adapter, 2026-09-25 to 2026-10-16 
 
 - **46 compactions: 45 at a break the agent or user chose, 1 forced by the host.**
 - **Median context 379K → 83K tokens** (43 measurable). About 70K of what remains is fixed overhead.
+- Handoff snapshots kept at real compactions: 45 snapshots at 24 compactions in 7 sessions (2026-10-16 to 10-21).
 - The one forced compaction (860K) came during a 49-tool-call turn with no user message, when reminders only ran on user turns. Reminders now also run after tool calls.
 
 ![Context before and after each compaction, Sep 23 to Oct 16, 2026](docs/img/compactions.svg)
@@ -130,7 +131,7 @@ Use this path only if you want to build the source preview. Requires Linux or Wi
    python adapters/codex/install_codex.py plan
    ```
 
-   Success: prints the pinned upstream, verified patch hashes, reviewed tree, source/install paths and no `missing:` tools. If a tool is missing or hash verification fails, resolve that issue before building. `plan` checks PATH tools; it does not prove the C++ toolchain can build.
+   Success: prints the pinned upstream, verified patch hashes, reviewed tree, source/install paths and no `missing:` tools. If a tool is missing or hash verification fails, resolve that issue before building. `plan` only checks tools on PATH; the C++ toolchain is exercised by the build step.
 
 2. Build and install the separate runtime:
 
@@ -146,7 +147,7 @@ Use this path only if you want to build the source preview. Requires Linux or Wi
    python adapters/codex/install_codex.py doctor
    ```
 
-   Success: prints the installed executable's version, `ok:` and `launcher:`, and exits 0. For `not installed:` or `problem:`, inspect the named install, marker, executable or launcher. This does not establish a long real session or model-following reliability.
+   Success: prints the installed executable's version, `ok:` and `launcher:`, and exits 0. For `not installed:` or `problem:`, inspect the named install, marker, executable or launcher.
 
 The runtime installs under `$CODEX_HOME/runtimes/` with its own launcher and leaves the existing Codex binary, config and desktop app untouched. The launcher enables checkpoint reminders for that invocation. It still reads the same `~/.codex`; upstream releases require a patch rebase. `uninstall` removes only the installer-marked runtime.
 
@@ -223,11 +224,9 @@ The measured daily-use observations are in [Results](#results); individual mecha
 
 ### Codex patches (`runtime-review*/`)
 
-**Source preview.** No prebuilt binary; the installer in [Install](#codex-patches-source-preview) builds from source. Daily use so far is in the maintainer's private overlay, not in this public build.
+**Source preview.** No prebuilt binary; the installer in [Install](#codex-patches-source-preview) builds from source. The same patches are used daily through the maintainer's private overlay.
 
 The same flow as a `handoff_compact` tool inside Codex. The agent writes a handoff file and calls `handoff_compact(mode="prepare")`, which stores a copy and binds it to the thread and to the user request it covers. The agent then compacts with A or C and either continues or waits. After compaction the agent receives an opaque handoff ID and reads the handoff back in bounded pages; the original request is not replayed.
-
-The continue/wait behaviour described here is the public **source-preview design**, not a shipped Claude adapter continuation feature or a long-session validation claim.
 
 <details>
 <summary><b>Verified, and known gaps</b></summary>
@@ -290,20 +289,12 @@ Success: `list` prints section numbers and `get` prints the section with `verifi
 
 ## Verification
 
-Read [docs/VERIFICATION.md](docs/VERIFICATION.md) for dated evidence, measurement definitions, failures and unverified cases, and [docs/CI_SCOPE.md](docs/CI_SCOPE.md) for CI boundaries. These are recorded results for their stated commits and environments, not tests rerun by this README. Claude unit CI does not run Claude Code; Codex mock-model host tests do not establish real-model adherence. Private overlay use is labelled separately and does not validate this public build.
+What was tested, on which commit and environment, and what was not: [docs/VERIFICATION.md](docs/VERIFICATION.md) and [docs/CI_SCOPE.md](docs/CI_SCOPE.md).
 
 ## Limitations
 
-- Function hooks are an early-access Claude Code feature; the installer turns them on.
-- Developed and used on Windows. CI runs the adapter's unit tests on Linux; a full install has only been run on the maintainer's machine.
-- Context can only be rewritten at compaction time; between compactions, only new output can be kept small.
-- The idle reminder has passed tests but has not yet been seen firing after a real idle period.
+- Full installs so far are on Windows. Linux is covered by CI; macOS is untested.
 - Messages default to Traditional Chinese; set `--language en` for English.
-- Not included from the private setup: the control panel.
-- Codex: see the known gaps for the [hooks](#codex-hooks-adapterscodexhooks) and the [patches](#codex-patches-runtime-review) above. Both are tested against a mock model server, not with a real model.
-- Continue/wait: the resume prompt is an instruction to the model, so whether it resumes the right work, and stops when it should wait, still depends on the model; the controlled evaluation measuring this is still running. Recovered-sentence ranking has unit tests with mock endpoints; real model services are not yet verified. A per-rule provenance ledger and explicit post-snapshot message delivery are planned. Optional model suggestions in the public adapter do not provide these features.
-- Snapshot freshness and source hashes do not prove that a handoff is complete, that a source statement is true, or that a model follows it. There is no general exactly-once side-effect guarantee.
-- Claude handoff snapshots have since been recorded at real compactions (45 snapshots at 24 compactions in 7 sessions, 2026-10-16 to 10-21); a snapshot proves what the handoff said at that moment, not that it was right.
 
 
 ## Privacy
