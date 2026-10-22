@@ -7,7 +7,7 @@
     ".gitignore": "96fa7771a22533d06d93e4542729ed2f406353627c34d5737c4b8addfce02800",
     "LICENSE": "7c965f4be4f6d4bd9535eb7a9811ca4c6f441f5758ac817bf39e1abb49e294a5",
     "NOTICE": "7377b1e3fd3fcb5d6a0610be97247097c783685c9ba9289c3713859cd7b0e575",
-    "README.md": "91d9e4e37ce5ee2f31b6aefefa163099e9d777ffc631ae56853edb6af42c9b06",
+    "README.md": "90b869b9e85a2908e7318b12812ba8f742eb86e8e2da7d487d148c31e6625623",
     "adapters/claude/.claude-plugin/marketplace.json": "6bb4b9ea59e02ab62bbc5edb6eb3fc1c087a2a5dbf2d6417a1f50e54b1cf2401",
     "adapters/claude/cw_claude.py": "5cc3439b574d7a902666b9e6750a8e5171e2ca0737942468c01104246aa24c91",
     "adapters/claude/cw_diet.py": "1919e7b6ed2a90e6ec2a64c3cda5f8f76476dc5ce16849672a62de26f2205b6c",
