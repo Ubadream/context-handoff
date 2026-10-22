@@ -23,6 +23,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from cw_lang import t
+
 HOME = Path(os.environ.get("CLAUDE_HOME", Path.home() / ".claude"))
 from cw_paths import STATE_ROOT as STATE  # noqa: E402
 GAP_DIR = Path(os.environ.get("CW_COMPACT_GAP_DIR", STATE / "compact-gap"))
@@ -33,22 +35,22 @@ MATCH_SECONDS = 120  # wife-compact 的 trace 和原話檔沒有 session id，�
 CAPABILITIES = [
     # id、做不做得到、怎麼做到、限制。面板照這張決定按鈕能不能按、不能按時顯示理由。
     {"id": "view.sessions", "supported": True, "via": "~/.claude/projects/*/<session>.jsonl"},
-    {"id": "view.current_summary", "supported": True, "via": "壓縮分界後的 isCompactSummary 訊息"},
-    {"id": "view.compaction_history", "supported": True, "via": "compact_boundary 紀錄＋compact_gap log＋wife-compact trace"},
-    {"id": "view.handoffs", "supported": True, "via": "handoff_bind.py：這個對話自己 Write／Edit 過的 HANDOFF*.md"},
-    {"id": "compact.schedule", "supported": True, "via": "wife-compact 外掛的 compact 工具（A／C；B 0930 拿掉）",
-     "limits": "只能在對話裡由老婆呼叫；從外面排定還沒接"},
-    {"id": "compact.instructions_next", "supported": True, "via": "/compact 附指示；wife-compact 的 keep 欄位"},
-    {"id": "compact.replace_at_compaction", "supported": True, "via": "函式 hook session.compact 回傳自訂訊息列（B 模式就是這樣）",
-     "limits": "函式 hook 是 early access，要 CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1；依項目換模板還沒做"},
+    {"id": "view.current_summary", "supported": True, "via": t("壓縮分界後的 isCompactSummary 訊息", 'isCompactSummary message after the compaction boundary')},
+    {"id": "view.compaction_history", "supported": True, "via": t("compact_boundary 紀錄＋compact_gap log＋wife-compact trace", 'compact_boundary records + compact_gap log + wife-compact trace')},
+    {"id": "view.handoffs", "supported": True, "via": t("handoff_bind.py：這個對話自己 Write／Edit 過的 HANDOFF*.md", 'handoff_bind.py: HANDOFF*.md files written or edited by this session')},
+    {"id": "compact.schedule", "supported": True, "via": t("wife-compact 外掛的 compact 工具（A／C；B 0930 拿掉）", 'compact tool in the wife-compact plugin (A/C; B removed on 0930)'),
+     "limits": t("只能在對話裡由老婆呼叫；從外面排定還沒接", 'Only the agent can call it within the conversation; external scheduling is not wired yet')},
+    {"id": "compact.instructions_next", "supported": True, "via": t("/compact 附指示；wife-compact 的 keep 欄位", '/compact instructions; the keep field in wife-compact')},
+    {"id": "compact.replace_at_compaction", "supported": True, "via": t("函式 hook session.compact 回傳自訂訊息列（B 模式就是這樣）", 'The session.compact function hook returns custom messages (as mode B did)'),
+     "limits": t("函式 hook 是 early access，要 CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1；依項目換模板還沒做", 'Function hooks are early access and require CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1; per-project templates are not implemented')},
     {"id": "summary.replace_after_compaction", "supported": False,
-     "reason": "壓完後已生效的摘要，Claude Code 沒有入口可以換；只能補注入"},
-    {"id": "inject.after_compaction", "supported": True, "via": "compact_gap.py：壓後第一句話由 UserPromptSubmit 補 additionalContext",
-     "limits": "Claude 的 SessionStart 比 PostCompact 早到，所以要等老公下一句話才補"},
+     "reason": t("壓完後已生效的摘要，Claude Code 沒有入口可以換；只能補注入", 'Claude Code cannot replace an active summary after compaction; only supplemental injection is available')},
+    {"id": "inject.after_compaction", "supported": True, "via": t("compact_gap.py：壓後第一句話由 UserPromptSubmit 補 additionalContext", 'compact_gap.py: UserPromptSubmit adds additionalContext on the first prompt after compaction'),
+     "limits": t("Claude 的 SessionStart 比 PostCompact 早到，所以要等老公下一句話才補", 'Claude SessionStart precedes PostCompact, so injection waits for the next user prompt')},
     {"id": "continue.after_compaction", "supported": False,
-     "reason": "還沒做；函式 hook 的 prompt.submit 可能做得到，未試"},
-    {"id": "notice.user", "supported": True, "via": "hook 輸出 systemMessage",
-     "limits": "桌面版顯示成摺起來的「Claude Code notice」"},
+     "reason": t("還沒做；函式 hook 的 prompt.submit 可能做得到，未試", 'Not implemented; the prompt.submit function hook may support it, but it is untested')},
+    {"id": "notice.user", "supported": True, "via": t("hook 輸出 systemMessage", 'systemMessage from hook output'),
+     "limits": t("桌面版顯示成摺起來的「Claude Code notice」", 'Shown as a collapsed Claude Code notice in the desktop app')},
 ]
 
 
@@ -76,9 +78,9 @@ def transcripts():
 def find_session(prefix):
     hits = [p for p in transcripts() if p.stem.startswith(prefix)]
     if not hits:
-        sys.exit(f"找不到對話 {prefix}")
+        sys.exit(t(f"找不到對話 {prefix}", f'''Session not found: {prefix}'''))
     if len({p.stem for p in hits}) > 1:
-        sys.exit(f"{prefix} 對到多個對話：{', '.join(sorted({p.stem for p in hits}))}")
+        sys.exit(t(f"{prefix} 對到多個對話：{', '.join(sorted({p.stem for p in hits}))}", f'''{prefix} matches multiple sessions: {', '.join(sorted({p.stem for p in hits}))}'''))
     return max(hits, key=lambda p: p.stat().st_mtime)
 
 
@@ -168,7 +170,7 @@ def wife_compact_runs():
         return None
     runs = []
     for line in trace.read_text(encoding="utf-8", errors="ignore").splitlines():
-        m = re.match(r"(\S+) v\S+ session\.compact (?:([ABC]) 完成|trigger=\S+ pending=-)", line)
+        m = re.match(r"(\S+) v\S+ session\.compact (?:([ABC]) (?:完成|completed)|trigger=\S+ pending=-)", line)
         if m:
             runs.append((parse_utc(m.group(1)), m.group(2) or "builtin"))
     return runs
@@ -204,7 +206,7 @@ def gap_local_time(entry):
         return None
 
 
-PICKED_LINE = re.compile(r"^- (\d{4}-\d\d-\d\d \d\d:\d\d) (老公貼來的|老公|老婆|別的視窗(?:（[^）]*）)?)：(.*?)(?:（Jev ([\d.]+)[^（）]*）)?$")
+PICKED_LINE = re.compile(r"^- (\d{4}-\d\d-\d\d \d\d:\d\d) (老公貼來的|老公|老婆|別的視窗(?:（[^）]*）)?|user|assistant|program|the user|the agent|another session)[:：](.*?)(?:（Jev ([\d.]+)[^（）]*）)?$")
 PROBE_CHARS = re.compile(r"[\w\u3400-\u9fff]{4,}")  # 找原文時用的一段字：只取字母和漢字，避開 JSON 跳脫
 
 
@@ -218,7 +220,7 @@ def parse_picked(text):
         body = m.group(3)
         items.append({"said_at": m.group(1), "speaker": m.group(2), "text": body,
                       "jev": float(m.group(4)) if m.group(4) else None,
-                      "truncated": body.endswith("（截斷）")})
+                      "truncated": body.endswith(("（截斷）", "... (truncated)"))})
     return items
 
 
@@ -236,7 +238,7 @@ def resolve_sources(path, history):
             pieces = sorted(PROBE_CHARS.findall(item["text"].removesuffix("…（截斷）")), key=len, reverse=True)[:3]
             item["source"] = None
             if pieces:
-                wanted.append(([p[:16] for p in pieces], item, "assistant" if item["speaker"] == "老婆" else "user"))
+                wanted.append(([p[:16] for p in pieces], item, "assistant" if item["speaker"] in ("老婆", "assistant", "the agent") else "user"))
     if not wanted:
         return
     probes = {p for ps, _, _ in wanted for p in ps}
@@ -362,7 +364,7 @@ def cmd_show(args):
             "handoffs": handoffs(path),
             "compact_gap_pending": pending.exists() if GAP_DIR.exists() else None,
             "scheduled_compaction": None,  # wife-compact 的排定只在對話的記憶體裡，外面看不到
-            "scheduled_compaction_note": "外面讀不到；排定後老婆會在回覆裡說"}
+            "scheduled_compaction_note": t("外面讀不到；排定後老婆會在回覆裡說", 'Not visible externally; the agent reports scheduling in its reply')}
 
 
 def cmd_compactions(args):
@@ -374,16 +376,16 @@ def cmd_summary(args):
     path = find_session(args.session)
     items = scan(path)["compactions"]
     if not items:
-        sys.exit("這個對話還沒壓縮過")
+        sys.exit(t("這個對話還沒壓縮過", 'This session has not been compacted'))
     n = args.n or len(items)
     if not 1 <= n <= len(items):
-        sys.exit(f"只有 {len(items)} 次壓縮")
+        sys.exit(t(f"只有 {len(items)} 次壓縮", f'''Only {len(items)} compactions exist'''))
     c = items[n - 1]
     return {"session": path.stem, "index": n, "at": local(c["at"]), "summary": c["summary"]}
 
 
 def main():
-    ap = argparse.ArgumentParser(description="context-workbench：Claude Code 接頭（只讀）")
+    ap = argparse.ArgumentParser(description=t("context-workbench：Claude Code 接頭（只讀）", 'context-workbench: read-only Claude Code adapter'))
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("capabilities")
     s = sub.add_parser("sessions")

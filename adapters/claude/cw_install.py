@@ -19,6 +19,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from cw_lang import t
+
 HERE = Path(__file__).resolve().parent            # adapters/claude：也是 wife-local 市集的根
 HOOKS_DIR = HERE / "hooks"
 CLAUDE_HOME = Path(os.environ.get("CW_CLAUDE_HOME") or Path.home() / ".claude")
@@ -92,7 +94,7 @@ def check_hooks(settings):
         got = find(settings, event, matcher, script) or [
             h for g in other_matcher(settings, event, matcher, script) for h in g["hooks"]]
         state = ("ok" if any(h["command"] == want and h.get("timeout", 0) >= timeout for h in got) else
-                 "別處" if got else "沒接")
+                 t("別處", 'elsewhere') if got else t("沒接", 'not connected'))
         rows.append((state, f"{event}{f'[{matcher}]' if matcher else ''} {Path(script).name}{' ' + arg if arg else ''}",
                      got[0]["command"] if got and state != "ok" else ""))
     return rows
@@ -141,7 +143,8 @@ def claude(*argv):
     r = subprocess.run(["claude", "plugin", *argv], capture_output=True, text=True, encoding="utf-8",
                        errors="replace", shell=os.name == "nt")
     if r.returncode:
-        sys.exit(f"claude plugin {' '.join(argv)} 失敗：\n{(r.stdout + r.stderr)[-1500:]}")
+        sys.exit(t(f"claude plugin {' '.join(argv)} 失敗：\n{(r.stdout + r.stderr)[-1500:]}", f'''claude plugin {' '.join(argv)} failed:
+{(r.stdout + r.stderr)[-1500:]}'''))
     return r.stdout
 
 
@@ -155,39 +158,40 @@ def same(a, b):
 def doctor():
     settings = load(SETTINGS, None)
     if settings is None:
-        print(f"沒接：找不到 {SETTINGS}")
+        print(t(f"沒接：找不到 {SETTINGS}", f'''not connected: cannot find {SETTINGS}'''))
         return 1
     bad = 0
-    print("hook（settings.json）")
+    print(t("hook（settings.json）", "Hooks (settings.json)"))
     for state, what, where in check_hooks(settings):
         bad += state != "ok"
-        print(f"  {state:4} {what}" + (f"\n        現在指：{where}" if where else ""))
+        print(f"  {state:4} {what}" + (t(f"\n        現在指：{where}", f'''
+        Currently points to: {where}''') if where else ""))
     print("env")
     for k, v in ENV.items():
         got = settings.get("env", {}).get(k)
         bad += got != v
-        print(f"  {'ok' if got == v else '沒接':4} {k}={got}（要 {v}）")
+        print(t(f"  {'ok' if got == v else '沒接':4} {k}={got}（要 {v}）", f'''  {'ok' if got == v else 'not connected':4} {k}={got} (expected {v})'''))
     window = settings.get("env", {}).get("CLAUDE_CODE_AUTO_COMPACT_WINDOW")
-    print(f"  資訊 CLAUDE_CODE_AUTO_COMPACT_WINDOW={window}（改用 cw_thresholds.py）")
+    print(t(f"  資訊 CLAUDE_CODE_AUTO_COMPACT_WINDOW={window}（改用 cw_thresholds.py）", f'''  info CLAUDE_CODE_AUTO_COMPACT_WINDOW={window} (use cw_thresholds.py to change)'''))
     path, installed, repo = plugin_state()
-    print("外掛")
+    print(t("外掛", 'Plugins'))
     market_ok = same(path, HERE)
     bad += not market_ok
-    print(f"  {'ok' if market_ok else '別處':4} {MARKET} 市集 → {path}")
+    print(t(f"  {'ok' if market_ok else '別處':4} {MARKET} 市集 → {path}", f'''  {'ok' if market_ok else 'elsewhere':4} {MARKET} marketplace -> {path}'''))
     ver_ok = installed == repo
     bad += not ver_ok
-    print(f"  {'ok' if ver_ok else '舊版':4} {PLUGIN} 已裝 {installed}，倉庫 {repo}" + ("" if ver_ok else "（跑 wife-compact/release.py）"))
+    print(t(f"  {'ok' if ver_ok else '舊版':4} {PLUGIN} 已裝 {installed}，倉庫 {repo}", f'''  {'ok' if ver_ok else 'old version':4} {PLUGIN} installed {installed}, repository {repo}''') + ("" if ver_ok else t("（跑 wife-compact/release.py）", ' (run wife-compact/release.py)')))
     enabled = settings.get("enabledPlugins", {}).get(f"{PLUGIN}@{MARKET}")
     bad += not enabled
-    print(f"  {'ok' if enabled else '沒開':4} enabledPlugins")
-    print("舊路徑轉接（~/.claude/hooks）")
+    print(t(f"  {'ok' if enabled else '沒開':4} enabledPlugins", f'''  {'ok' if enabled else 'off':4} enabledPlugins'''))
+    print(t("舊路徑轉接（~/.claude/hooks）", 'Legacy path shims (~/.claude/hooks)'))
     for name in SHIMMED:
         old = OLD_HOOKS / name
         text = old.read_text(encoding="utf-8") if old.exists() else ""
-        state = "ok" if "已搬到 context-workbench" in text else "沒檔" if not text else "舊版"
-        bad += state == "舊版"
-        print(f"  {state:4} {name}" + ("（還是搬家前的全文，會跟倉庫分岔）" if state == "舊版" else ""))
-    print("外部依賴")
+        state = "ok" if "已搬到 context-workbench" in text else t("沒檔", 'missing file') if not text else t("舊版", 'old version')
+        bad += state == t("舊版", 'old version')
+        print(f"  {state:4} {name}" + (t("（還是搬家前的全文，會跟倉庫分岔）", ' (still a full legacy copy; may diverge from the repository)') if state == t("舊版", 'old version') else ""))
+    print(t("外部依賴", 'External dependencies'))
     import cw_gap_model
     try:
         config = cw_gap_model.settings()
@@ -197,7 +201,7 @@ def doctor():
             cmd = os.environ.get("CW_MODEL_CMD") or config["command"]
             import shlex
             executable = shlex.split(cmd, posix=False)[0].strip('"')
-            print(f"  {'ok' if shutil.which(executable) else '缺':4} ranking command (failure falls back to none)")
+            print(t(f"  {'ok' if shutil.which(executable) else '缺':4} ranking command (failure falls back to none)", f'''  {'ok' if shutil.which(executable) else 'missing':4} ranking command (failure falls back to none)'''))
         if provider == "openai":
             key_env = config.get("api_key", "")
             print(f"  ranking model={config['model']}; credential env={'set' if os.environ.get(key_env) else 'unset/local anonymous'}")
@@ -205,28 +209,34 @@ def doctor():
         bad += 1
         print("  invalid compact_gap settings (runtime falls back to none)")
     import cw_model
-    print(f"  資訊 分段／交接建議用的模型：{cw_model.name() or '沒有（只切段、不附建議；要的話設 CW_MODEL_CMD）'}")
+    print(t(f"  資訊 分段／交接建議用的模型：{cw_model.name() or '沒有（只切段、不附建議；要的話設 CW_MODEL_CMD）'}", f'''  info Model for segment/handoff advice: {cw_model.name() or 'none (segments only, no advice; set CW_MODEL_CMD to enable)'}'''))
     for tool in ("node", "claude"):
-        print(f"  {'ok' if shutil.which(tool) else '缺':4} {tool}")
-    print("全部接好" if not bad else f"{bad} 項要處理：跑 cw_install.py apply")
+        print(t(f"  {'ok' if shutil.which(tool) else '缺':4} {tool}", f'''  {'ok' if shutil.which(tool) else 'missing':4} {tool}'''))
+    print(t("全部接好", 'all connected') if not bad else t(f"{bad} 項要處理：跑 cw_install.py apply", f'''{bad} items need attention: run cw_install.py apply'''))
     return 1 if bad else 0
 
 
-def apply(dry):
+def apply(dry, language=None):
     raw = SETTINGS.read_bytes() if SETTINGS.exists() else b"{}"
     settings = fix_hooks(json.loads(raw.decode("utf-8")))
     settings.setdefault("env", {}).update(ENV)
     new = json.dumps(settings, indent=2, ensure_ascii=False) + "\n"
     changed = new.encode("utf-8") != raw
-    print(f"settings.json：{'要改' if changed else '不用改'}")
+    print(t(f"settings.json：{'要改' if changed else '不用改'}", f'''settings.json: {'change' if changed else 'no change'}'''))
     shims = [n for n in SHIMMED if (OLD_HOOKS / n).exists()
              and "已搬到 context-workbench" not in (OLD_HOOKS / n).read_text(encoding="utf-8")]
-    print(f"舊路徑轉接：{'、'.join(shims) or '不用改'}")
+    print(t(f"舊路徑轉接：{'、'.join(shims) or '不用改'}", f'''Legacy path shims: {', '.join(shims) or 'no change'}'''))
     path, _, _ = plugin_state()
     move_market = not same(path, HERE)
-    print(f"市集：{'改指 ' + str(HERE) if move_market else '不用改'}")
+    print(t(f"市集：{'改指 ' + str(HERE) if move_market else '不用改'}", f'''Marketplace: {'point to ' + str(HERE) if move_market else 'no change'}'''))
     if dry:
         return
+    if language:
+        from cw_thresholds import THRESHOLDS, load_json
+        data = load_json(THRESHOLDS, {})
+        data.setdefault("claude", {})["language"] = language
+        THRESHOLDS.parent.mkdir(parents=True, exist_ok=True)
+        THRESHOLDS.write_text(json.dumps(data, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     if changed:
         if SETTINGS.exists():
@@ -234,7 +244,7 @@ def apply(dry):
         SETTINGS.parent.mkdir(parents=True, exist_ok=True)
         SETTINGS.write_text(new, encoding="utf-8", newline="\n")
         if json.loads(SETTINGS.read_text(encoding="utf-8")) != settings:
-            sys.exit("settings.json 讀回不符；備份在旁邊，先別重開")
+            sys.exit(t("settings.json 讀回不符；備份在旁邊，先別重開", 'settings.json readback mismatch; the backup is beside it. Do not restart yet'))
     for name in shims:
         old = OLD_HOOKS / name
         shutil.copy2(old, old.with_name(f"{name}.bak-cw-{stamp}"))
@@ -244,19 +254,32 @@ def apply(dry):
             claude("marketplace", "remove", MARKET)
         claude("marketplace", "add", str(HERE))
         claude("install", f"{PLUGIN}@{MARKET}")
-    print("完成；重開 Claude 才生效，重開後跑 doctor 再看一次")
+    print(t("完成；重開 Claude 才生效，重開後跑 doctor 再看一次", 'Done; restart Claude to apply, then run doctor again'))
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(description=t(__doc__, """Install and check the Claude adapter: wire hooks, plugin, and required environment from this checkout.
+
+  doctor              List connected, missing, or elsewhere entries without changes; exit 1 if incomplete.
+  apply [--dry-run]   Repoint matching hooks in settings.json in place, adding missing entries.
+                      Set CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 and CW_WORKBENCH/CW_PYTHON.
+                      Point wife-local at this checkout and install wife-compact.
+                      Replace same-name legacy ~/.claude/hooks files with forwarding shims
+                      for hosts still using those paths (including Codex config.toml).
+                      Back up settings.json as settings.json.bak-cw-<timestamp> before changing it.
+
+Automatic compaction windows/reminder thresholds (cw_thresholds.py) and diet (cw_diet.py)
+are managed separately; doctor also shows current values. Restart Claude after applying changes.
+"""), formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("doctor")
     a = sub.add_parser("apply")
     a.add_argument("--dry-run", action="store_true")
+    a.add_argument("--language", choices=["en", "zh"], help=t("訊息語言（預設 zh）", "Message language (default: zh)"))
     args = ap.parse_args()
     if args.cmd == "doctor":
         sys.exit(doctor())
-    apply(args.dry_run)
+    apply(args.dry_run, language=args.language)
 
 
 if __name__ == "__main__":

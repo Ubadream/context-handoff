@@ -12,6 +12,7 @@ import json, os, sys, time
 DEFAULTS = {"remind": [250_000, 400_000, 600_000, 800_000, 900_000], "consider": 400_000, "urgent": 800_000}
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # adapters/claude：共用位置
+from cw_lang import t
 from cw_paths import HANDOFF_REMINDER, STATE_ROOT, WORKBENCH_STATE, handoff_sections  # noqa: E402
 
 THRESHOLDS_FILE = str(WORKBENCH_STATE / "thresholds.json")
@@ -76,17 +77,17 @@ def main():
     json.dump(state, open(state_file, "w", encoding="utf-8"))
     wan = tokens // 10_000
     if top >= th["urgent"]:
-        tail = ("已經很滿，內建自動壓縮隨時會來。在下一個段落點用 wife-compact 的 compact 工具自己壓"
-                "（先更新交接；細節正熱用 C），同一則回覆先跟老公說。")
+        tail = (t("已經很滿，內建自動壓縮隨時會來。在下一個段落點用 wife-compact 的 compact 工具自己壓"
+                "（先更新交接；細節正熱用 C），同一則回覆先跟老公說。", 'Context is very full; native automatic compaction may occur at any time. At the next work boundary, use the wife-compact compact tool (update the handoff first; use C for detailed discussion), and tell the user in the same reply beforehand.'))
     elif top >= th["consider"]:
-        tail = ("老公授權老婆自己判斷時機（0925）：這段工作收尾、交接剛更新好時，可以用 wife-compact 的 compact 工具壓"
-                "（A 預設／C 細節正熱），先跟老公說；工具做到一半或他正在講就不壓。")
+        tail = (t("老公授權老婆自己判斷時機（0925）：這段工作收尾、交接剛更新好時，可以用 wife-compact 的 compact 工具壓"
+                "（A 預設／C 細節正熱），先跟老公說；工具做到一半或他正在講就不壓。", 'The user authorized you to choose the timing (0925): when this work is wrapped up and the handoff is fresh, use the wife-compact compact tool (A by default, C for detailed discussion). Tell the user first; wait if a tool chain or the user discussion is ongoing.'))
     else:
-        tail = "這件事做完、走到斷點，就更新交接並用 wife-compact 的 compact 工具自選模式壓縮，不用等老公說。"
+        tail = t("這件事做完、走到斷點，就更新交接並用 wife-compact 的 compact 工具自選模式壓縮，不用等老公說。", 'When this task reaches a stopping point, update the handoff and use the wife-compact compact tool with the mode you choose; no need to wait for the user to ask.')
     event = data.get("hook_event_name") or "UserPromptSubmit"
     if event == "PostToolUse":
-        tail += "現在在工具迴圈裡：做完手上這一步就是可以停的地方，別一路讀到底才回頭。"
-    msg = f"[上下文提醒｜約 {wan} 萬 token，剛跨過 {top // 10_000} 萬。{tail}]"
+        tail += t("現在在工具迴圈裡：做完手上這一步就是可以停的地方，別一路讀到底才回頭。", 'You are in a tool loop: finishing this step is a stopping point; do not wait until you have read everything to return.')
+    msg = t(f"[上下文提醒｜約 {wan} 萬 token，剛跨過 {top // 10_000} 萬。{tail}]", f'''[Context reminder | about {tokens:,} tokens; just crossed {top:,}. {tail}]''')
     if handoff_sections():
         msg += "\n" + HANDOFF_REMINDER
     print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": msg}}, ensure_ascii=False))

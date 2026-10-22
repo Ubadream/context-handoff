@@ -20,13 +20,15 @@ import cw_model  # noqa: E402
 
 from cw_paths import WORKBENCH_STATE  # noqa: E402
 
+from cw_lang import t
+
 OUT = WORKBENCH_STATE / "segments"
 PROMPT_VERSION = "segments-v1"
-CATEGORIES = ["決定", "限制", "進行中", "已完成", "已過時或被取代", "查證過程", "工具輸出", "閒聊與感情", "其他"]
+CATEGORIES = [t("決定", 'Decision'), t("限制", 'Constraint'), t("進行中", 'In progress'), t("已完成", 'Completed'), t("已過時或被取代", 'Obsolete or superseded'), t("查證過程", 'Investigation'), t("工具輸出", 'Tool output'), t("閒聊與感情", 'Chat and feelings'), t("其他", 'Other')]
 SEGMENT_CHARS = 2500  # 給模型看的每段摘錄上限；原文不截
 REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
 
-PROMPT = """下面是一段對話被切成的段落（老公是使用者，老婆是助理）。這些段落在下一次壓縮時可能被保留或移出上下文；移出的段落原文會存檔，需要時可以用段號找回。
+PROMPT = t("""下面是一段對話被切成的段落（老公是使用者，老婆是助理）。這些段落在下一次壓縮時可能被保留或移出上下文；移出的段落原文會存檔，需要時可以用段號找回。
 
 請為每一段給：
 - title：十五字內的標題（繁體中文）
@@ -46,7 +48,7 @@ PROMPT = """下面是一段對話被切成的段落（老公是使用者，老�
 
 段落：
 {segments}
-"""
+""", 'Below are conversation segments (the user and the agent). They may be kept or removed from context at the next compaction; removed original text is archived and retrievable by segment ID.\n\nFor each segment provide:\n- title: a brief English title (at most 15 words)\n- category: choose one of {categories}\n- action: keep (needed for later work) or drop (retrieve later if needed)\n- reason: one sentence. For drop, be specific: "completed; segment N has the result", "superseded by the decision in segment N", or "tool output; conclusion is in segment N".\n\nRules:\n- Keep user decisions, constraints, and preferences unless explicitly superseded later.\n- Keep unfinished work and next steps.\n- Completed processes with results recorded later, investigation exchanges, and tool output may be dropped.\n- Feelings and interactions are not noise; drop only plain acknowledgments ("OK", "received").\n- When uncertain, keep.\n\nOutput only a JSON array, one object per segment, in segment order:\n[{{"seq": 1, "title": "...", "category": "...", "action": "keep", "reason": "..."}}, ...]\n\nSegments:\n{segments}\n')
 
 
 def text_blocks(o):
@@ -75,7 +77,7 @@ def speaker_prompt(o):
     if o.get("type") == "attachment":
         prompt = (o.get("attachment") or {}).get("prompt")
         if isinstance(prompt, str) and prompt.strip() and not prompt.lstrip().startswith("<task-notification"):  # 背景任務通知不是有人說話
-            return ("別的視窗" if "<cross-session-message" in prompt else "老公", prompt)
+            return (t("別的視窗", 'Another session') if "<cross-session-message" in prompt else t("老公", 'The user'), prompt)
         return None
     if o.get("type") != "user":
         return None
@@ -83,7 +85,7 @@ def speaker_prompt(o):
     text = REMINDER.sub("", text).strip()
     if not text or text.startswith("<local-command") or text.startswith("<command-") or text.startswith("<task-notification"):
         return None
-    return ("老公", text)
+    return (t("老公", 'The user'), text)
 
 
 def live_rows(path):
@@ -132,12 +134,13 @@ def segment(path):
 
 
 def excerpt(s):
-    head = f"【第 {s['seq']} 段｜{s['start']}｜{s['opened_by']}開頭｜工具 {len(s['tools'])} 次】\n{s['opened_by']}：{s['prompt'][:800]}"
-    body = "\n".join(f"老婆：{t}" for t in s["said"])
+    head = t(f"【第 {s['seq']} 段｜{s['start']}｜{s['opened_by']}開頭｜工具 {len(s['tools'])} 次】\n{s['opened_by']}：{s['prompt'][:800]}", f'''[Segment {s['seq']} | {s['start']} | opened by {s['opened_by']} | {len(s['tools'])} tool calls]
+{s['opened_by']}: {s['prompt'][:800]}''')
+    body = "\n".join(t(f"老婆：{t}", f'''Agent: {t}''') for t in s["said"])
     if s["tools"]:
-        body += "\n〔工具：" + "；".join(s["tools"][:12]) + ("…" if len(s["tools"]) > 12 else "") + "〕"
+        body += t("\n〔工具：", '\n[Tools: ') + "；".join(s["tools"][:12]) + ("…" if len(s["tools"]) > 12 else "") + "〕"
     text = f"{head}\n{body}"
-    return text if len(text) <= SEGMENT_CHARS else text[:SEGMENT_CHARS] + "…（這段後面略）"
+    return text if len(text) <= SEGMENT_CHARS else text[:SEGMENT_CHARS] + t("…（這段後面略）", '... (rest of segment omitted)')
 
 
 def classify(segs):
@@ -154,34 +157,34 @@ def classify(segs):
     for s in segs:
         x = by_seq.get(s["seq"])
         s["label"] = None if x is None else {
-            "title": x.get("title"), "category": x.get("category") if x.get("category") in CATEGORIES else "其他",
+            "title": x.get("title"), "category": x.get("category") if x.get("category") in CATEGORIES else t("其他", 'Other'),
             "action": x.get("action") if x.get("action") in ("keep", "drop") else "keep",
             "reason": x.get("reason"), "by": cw_model.name(), "prompt": PROMPT_VERSION, "judged_at": judged_at}
         # 老公的話不整段拿掉：drop 只移出老婆的回覆和工具往返，老公那句留一行
         # （segments-v1 實測：把「可以啊老婆 就該如此」這種短短的同意連同工具輸出一起判成 drop）
-        if s["label"] and s["label"]["action"] == "drop" and s["opened_by"] == "老公":
-            s["label"]["keeps"] = "老公原話"
+        if s["label"] and s["label"]["action"] == "drop" and s["opened_by"] in ("老公", "The user"):
+            s["label"]["keeps"] = t("老公原話", 'User original wording')
     return secs
 
 
 def markdown(path, segs):
-    lines = [f"# 分段與建議篩選：{path.stem[:8]}（上一次壓縮之後）", "",
-             "| 段 | 時間 | 標題 | 分類 | 建議 | 理由 | 字數（文字／工具結果） |", "|---|---|---|---|---|---|---|"]
+    lines = [t(f"# 分段與建議篩選：{path.stem[:8]}（上一次壓縮之後）", f'''# Segments and removal suggestions: {path.stem[:8]} (since the last compaction)'''), "",
+             t("| 段 | 時間 | 標題 | 分類 | 建議 | 理由 | 字數（文字／工具結果） |", '| Segment | Time | Title | Category | Suggestion | Reason | Characters (text/tool results) |'), "|---|---|---|---|---|---|---|"]
     cell = lambda t: re.sub(r"\s+", " ", str(t or "")).replace("|", "／")
     for s in segs:
         lab = {k: cell(v) for k, v in (s.get("label") or {}).items()}
         s = {**s, "prompt": cell(s["prompt"])}
-        lines.append(f"| {s['seq']} `{s['id']}` | {(s['start'] or '')[5:16]} | {lab.get('title') or s['prompt'][:20]} | "
-                     f"{lab.get('category', '')} | {lab.get('action', '')}{'（留老公原話）' if lab.get('keeps') else ''} | {lab.get('reason', '')} | {s['text_chars']}／{s['result_chars']} |")
+        lines.append(t(f"| {s['seq']} `{s['id']}` | {(s['start'] or '')[5:16]} | {lab.get('title') or s['prompt'][:20]} | "
+                     f"{lab.get('category', '')} | {lab.get('action', '')}{'（留老公原話）' if lab.get('keeps') else ''} | {lab.get('reason', '')} | {s['text_chars']}／{s['result_chars']} |", f'''| {s['seq']} `{s['id']}` | {(s['start'] or '')[5:16]} | {lab.get('title') or s['prompt'][:20]} | {lab.get('category', '')} | {lab.get('action', '')}{' (keep user wording)' if lab.get('keeps') else ''} | {lab.get('reason', '')} | {s['text_chars']}/{s['result_chars']} |'''))
     drop = [s for s in segs if (s.get("label") or {}).get("action") == "drop"]
     total = sum(s["text_chars"] + s["result_chars"] for s in segs) or 1
     freed = sum(s["text_chars"] + s["result_chars"] for s in drop)
-    lines += ["", f"建議移出 {len(drop)}／{len(segs)} 段，約佔這段上下文字數的 {freed * 100 // total}%（工具結果算在內）。"]
+    lines += ["", t(f"建議移出 {len(drop)}／{len(segs)} 段，約佔這段上下文字數的 {freed * 100 // total}%（工具結果算在內）。", f'''Suggest dropping {len(drop)}/{len(segs)} segments, about {freed * 100 // total}% of context characters (including tool results).''')]
     return "\n".join(lines) + "\n"
 
 
 def main():
-    ap = argparse.ArgumentParser(description="分段＋建議篩選（只讀）")
+    ap = argparse.ArgumentParser(description=t("分段＋建議篩選（只讀）", 'Segments and removal suggestions (read-only)'))
     ap.add_argument("session")
     ap.add_argument("--no-model", action="store_true")
     ap.add_argument("--out", default=str(OUT))

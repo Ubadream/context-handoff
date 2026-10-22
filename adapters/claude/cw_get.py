@@ -24,6 +24,8 @@ import cw_claude  # noqa: E402
 import cw_sections  # noqa: E402
 import cw_segments  # noqa: E402
 
+from cw_lang import t
+
 TOOL_CALLS = Path(os.environ.get("CW_TOOL_CALLS", cw_claude.STATE / "context-workbench" / "tool-calls"))
 TOOL_ID = re.compile(r"^\d{4}-\d{6}~\d{6}_.+_[A-Za-z0-9_-]{1,4}$")
 SECTION_ID = re.compile(r"^([0-9a-f]{8}@\d{8}T\d{6})[§:](\d+)$")
@@ -33,20 +35,21 @@ SEGMENT_ID = re.compile(r"^([0-9a-f]{4,})#([0-9a-f-]{4,})$")
 def clip(text, limit):
     text = text if isinstance(text, str) else json.dumps(text, ensure_ascii=False, indent=1)
     if limit and len(text) > limit:
-        return f"{text[:limit]}\n…（後面還有 {len(text) - limit} 字，加 --full 看全部）"
+        return t(f"{text[:limit]}\n…（後面還有 {len(text) - limit} 字，加 --full 看全部）", f'''{text[:limit]}
+... ({len(text) - limit} more characters; use --full to see all)''')
     return text
 
 
 def get_tool(call_id, limit):
     hits = sorted(TOOL_CALLS.glob(f"*/{call_id}.json"))
     if not hits:
-        sys.exit(f"找不到工具編號 {call_id}（存在 {TOOL_CALLS}，留 30 天）")
+        sys.exit(t(f"找不到工具編號 {call_id}（存在 {TOOL_CALLS}，留 30 天）", f'''Tool ID not found: {call_id} (stored in {TOOL_CALLS}, retained for 30 days)'''))
     r = json.loads(hits[-1].read_text(encoding="utf-8"))
-    out = [f"{r['id']}｜{r['group']}｜{r['status']}｜{r.get('started') or '?'} → {r['finished']}｜對話 {(r.get('session') or '')[:8]}",
-           "", "【輸入】", clip(r.get("input"), limit)]
+    out = [t(f"{r['id']}｜{r['group']}｜{r['status']}｜{r.get('started') or '?'} → {r['finished']}｜對話 {(r.get('session') or '')[:8]}", f'''{r['id']} | {r['group']} | {r['status']} | {r.get('started') or '?'} -> {r['finished']} | session {(r.get('session') or '')[:8]}'''),
+           "", t("【輸入】", '[Input]'), clip(r.get("input"), limit)]
     if r.get("error"):
-        out += ["", "【錯誤】", clip(r["error"], limit)]
-    out += ["", "【回傳】", clip(r.get("response"), limit)]
+        out += ["", t("【錯誤】", '[Error]'), clip(r["error"], limit)]
+    out += ["", t("【回傳】", '[Response]'), clip(r.get("response"), limit)]
     return "\n".join(out)
 
 
@@ -98,14 +101,16 @@ def get_segment(sid8, uuid8, limit, parts=None):
                 if c.get("type") == "text" and o.get("type") == "assistant" and c.get("text", "").strip():
                     if parts is not None:
                         parts["said"].append(c["text"].strip())
-                    lines.append(f"老婆：{clip(c['text'].strip(), limit)}")
+                    lines.append(t(f"老婆：{clip(c['text'].strip(), limit)}", f'''Agent: {clip(c['text'].strip(), limit)}'''))
                 elif c.get("type") == "tool_use":
                     target = cw_segments.text_blocks({"message": {"content": [c]}})[0][1]
                     ref = ids.get(c.get("id"))
-                    lines.append(f"〔工具 {target}{'｜' + ref if ref else ''}〕")
+                    lines.append(t(f"〔工具 {target}{'｜' + ref if ref else ''}〕", f'''[Tool {target}{' | ' + ref if ref else ''}]'''))
     if not inside:
-        sys.exit(f"{path.stem[:8]} 裡找不到段號 #{uuid8}（要是老公那句話的訊息 uuid 開頭）")
-    return f"段 {sid8}#{uuid8}｜{path.stem}\n\n" + "\n\n".join(lines)
+        sys.exit(t(f"{path.stem[:8]} 裡找不到段號 #{uuid8}（要是老公那句話的訊息 uuid 開頭）", f'''{path.stem[:8]} has no segment #{uuid8} (use the UUID prefix of the user message)'''))
+    return t(f"段 {sid8}#{uuid8}｜{path.stem}\n\n", f'''Segment {sid8}#{uuid8} | {path.stem}
+
+''') + "\n\n".join(lines)
 
 
 def get_section(oid, n, limit):
@@ -113,17 +118,18 @@ def get_section(oid, n, limit):
     manifest = cw_sections.load(oid)
     secs = manifest["sections"]
     if not 1 <= n <= len(secs):
-        sys.exit(f"原文 {oid} 只有 §1～§{len(secs)}")
+        sys.exit(t(f"原文 {oid} 只有 §1～§{len(secs)}", f'''Original {oid} has only sections 1 through {len(secs)}'''))
     s = secs[n - 1]
     parts = {}
     text = get_segment(manifest["session"][:8], s["first_uuid"], limit, parts)
     now = cw_sections.section_hash(parts["first_uuid"], parts["prompt"], parts["said"])
-    check = "原樣" if now == s["hash"] else f"⚠ 內容跟建清單時不同（清單 {s['hash']}，現在 {now}）"
-    return f"原文 {oid}§{n}（{s['start']} ～ {s['end']}；{check}）\n" + text
+    check = t("原樣", 'unchanged') if now == s["hash"] else t(f"⚠ 內容跟建清單時不同（清單 {s['hash']}，現在 {now}）", f'''Warning: content differs from the index (index {s['hash']}, current {now})''')
+    return t(f"原文 {oid}§{n}（{s['start']} ～ {s['end']}；{check}）\n", f'''Original {oid}§{n} ({s['start']} - {s['end']}; {check})
+''') + text
 
 
 def main():
-    ap = argparse.ArgumentParser(description="用工具編號或段號找回原文（只讀）")
+    ap = argparse.ArgumentParser(description=t("用工具編號或段號找回原文（只讀）", 'Retrieve original text by tool or segment ID (read-only)'))
     ap.add_argument("ref")
     ap.add_argument("--full", action="store_true")
     ap.add_argument("--max", type=int, default=20000)
@@ -137,7 +143,7 @@ def main():
     elif TOOL_ID.match(ref):
         text = get_tool(ref, limit)
     else:
-        sys.exit("看不懂這個編號：工具編號長這樣 0929-221021~221021_Bash_tail_sXtR，段號長這樣 9bfa4859#1a2b3c4d，原文節號長這樣 9bfa4859@20260929T233012§3")
+        sys.exit(t("看不懂這個編號：工具編號長這樣 0929-221021~221021_Bash_tail_sXtR，段號長這樣 9bfa4859#1a2b3c4d，原文節號長這樣 9bfa4859@20260929T233012§3", 'Unrecognized ID: tool IDs look like 0929-221021~221021_Bash_tail_sXtR, segment IDs like 9bfa4859#1a2b3c4d, and section IDs like 9bfa4859@20260929T233012§3'))
     sys.stdout.buffer.write(text.encode("utf-8") + b"\n")
 
 

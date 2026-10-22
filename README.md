@@ -56,7 +56,7 @@ For an AI following this README: choose **one** host path, inspect its preview b
 
 ### Claude Code
 
-Requires Claude Code with **function hooks** (an early-access feature) and `node` and `claude` available on PATH. Messages and labels are currently in Traditional Chinese.
+Requires Claude Code with **function hooks** (an early-access feature) and `node` and `claude` available on PATH. Messages default to Traditional Chinese.
 
 1. Preview:
 
@@ -64,7 +64,7 @@ Requires Claude Code with **function hooks** (an early-access feature) and `node
    python adapters/claude/cw_install.py apply --dry-run
    ```
 
-   Success: prints the proposed `settings.json`, legacy-hook and marketplace changes (`要改` / `不用改` means change / no change), without applying them. If parsing fails, inspect the named `~/.claude/settings.json`; a missing script means you are outside the checkout root.
+   Success: prints the proposed `settings.json`, legacy-hook and marketplace changes (`要改` / `change`; `不用改` / `no change`), without applying them. If parsing fails, inspect the named `~/.claude/settings.json`; a missing script means you are outside the checkout root.
 
 2. Apply the reviewed changes:
 
@@ -80,7 +80,9 @@ Requires Claude Code with **function hooks** (an early-access feature) and `node
    python adapters/claude/cw_install.py doctor
    ```
 
-   Success: hooks, environment and plugin rows say `ok`, `node` and `claude` are found, and the final line is `全部接好` (all connected). Missing legacy shims (`沒檔`) are acceptable on a fresh installation. For `沒接`, `別處`, `舊版` or `沒開`, inspect the reported path/version and repeat the preview/apply cycle after correcting it. Also inspect dependency rows: the final status alone does not enforce every dependency. Doctor checks wiring, not successful model continuation.
+   Success: hooks, environment and plugin rows say `ok`, `node` and `claude` are found, and the final line is `全部接好` / `all connected`. Missing legacy shims (`沒檔` / `missing file`) are acceptable on a fresh installation. For `沒接` / `not connected`, `別處` / `elsewhere`, `舊版` / `old version` or `沒開` / `off`, inspect the reported path/version and repeat the preview/apply cycle after correcting it. Also inspect dependency rows: the final status alone does not enforce every dependency. Doctor checks wiring, not successful model continuation.
+
+4. English messages: `python adapters/claude/cw_thresholds.py set --language en`. Use `--language zh` to switch back. `CW_LANG=en|zh` overrides the setting; installation also accepts `cw_install.py apply --language en`.
 
 ### Codex hooks
 
@@ -296,7 +298,7 @@ Read [docs/VERIFICATION.md](docs/VERIFICATION.md) for dated evidence, measuremen
 - Developed and used on Windows. CI runs the adapter's unit tests on Linux; a full install has only been run on the maintainer's machine.
 - Context can only be rewritten at compaction time; between compactions, only new output can be kept small.
 - The idle reminder has passed tests but has not yet been seen firing after a real idle period.
-- Messages and labels are in Traditional Chinese.
+- Messages default to Traditional Chinese; set `--language en` for English.
 - Not included from the private setup: the control panel.
 - Codex: see the known gaps for the [hooks](#codex-hooks-adapterscodexhooks) and the [patches](#codex-patches-runtime-review) above. Both are tested against a mock model server, not with a real model.
 - Continue/wait: the resume prompt is an instruction to the model, so whether it resumes the right work, and stops when it should wait, still depends on the model; the controlled evaluation measuring this is still running. Recovered-sentence ranking has unit tests with mock endpoints; real model services are not yet verified. A per-rule provenance ledger and explicit post-snapshot message delivery are planned. Optional model suggestions in the public adapter do not provide these features.

@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # adapters/claude：共用位置
+from cw_lang import t
 from cw_paths import STATE_ROOT
 from cw_gap_model import Ranker, settings  # noqa: E402
 
@@ -25,9 +26,9 @@ MIN_SCORE = 0.8
 MAX_PICK = 10
 MAX_CHARS = 3000   # 補回上下文的總字數上限
 REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
-SKIP_PREFIX = ("This session is being continued", "〔壓縮前最近的原話", "〔摘要沒蓋到的原話")
-QUESTION = ("這句是不是之後接手工作還得記住的具體事實、決定、限制、注意事項或user的要求？"
-            "過場句、閒聊、情緒、只描述剛做完什麼的進度回報都不算。")
+SKIP_PREFIX = ("This session is being continued", "〔壓縮前最近的原話", "〔摘要沒蓋到的原話", "[Recent original wording before compaction", "[Original wording not covered by the summary")
+QUESTION = (t("這句是不是之後接手工作還得記住的具體事實、決定、限制、注意事項或user的要求？"
+            "過場句、閒聊、情緒、只描述剛做完什麼的進度回報都不算。", 'Does this sentence contain a concrete fact, decision, constraint, caution, or user request needed to resume work later? Transitional remarks, casual chat, emotions, and reports merely describing just-completed work do not count.'))
 REVISITED = 0.7    # 後面原話有這麼像的句子，就標「後來又談過」（不跳過，見 run）
 CONSTRAINT = re.compile(r"不要|不准|(?<!能)不能(?!不)|不可|不得|禁止|絕不|別再|別動|別改|只能|只限|只准|除非|例外|❌|不 ?commit|"
                         r"\b(?:never|don't|do not|must not)\b", re.I)
@@ -69,7 +70,7 @@ CROSS_SESSION = re.compile(r'<cross-session-message\b([^>]*)>(.*?)(?:</cross-ses
 FROM_NAME = re.compile(r'from-name="([^"]*)"')
 PLUGIN_PROMPT = re.compile(r"The [^\n]+ plugin sent a message:\s*\n")
 PROGRAM_PREFIX = ("〔wife-compact", "〔閒置提醒（wife-compact", "<task-notification>",
-                  "<local-command", "<command-")
+                  "[wife-compact", "[Idle reminder (wife-compact", "<local-command", "<command-")
 
 
 def claude_program(o, text):
@@ -319,9 +320,9 @@ def emitted(key=None):
 SNAPSHOT_LOGS = Path(settings().get("snapshot_dir") or LOG.parent / "snapshots")
 FOLLOWUP = LOG.parent / "followup"
 FOLLOWUP_TTL = 3600   # 快照一小時內沒出來就不等了
-STATE_FIELDS = (("conclusion", "結論"), ("turn", "轉折"), ("unresolved", "未決"))
+STATE_FIELDS = (("conclusion", t("結論", 'Conclusion')), ("turn", t("轉折", 'Turning point')), ("unresolved", t("未決", 'Unresolved')))
 STATE_CHARS = 80
-STATE_LABEL = "後來（交接快照，模型整理、未人工核）"
+STATE_LABEL = t("後來（交接快照，模型整理、未人工核）", 'Later state (handoff snapshot, model-generated, not human-reviewed)')
 
 
 def snapshots_for(sid, limit=6):
@@ -371,7 +372,7 @@ def attach_states(rows, sid):
         item = states.get(mid) if mid else None
         state = state_line(item) if item else ""
         if item is not None and id(item) in shown:
-            line += "\n  → 後來：同上一項"
+            line += t("\n  → 後來：同上一項", '\n  -> Later: same as the previous item')
         elif state:
             shown.add(id(item))
             line += f"\n  → {STATE_LABEL}：{state}"
@@ -406,7 +407,7 @@ def deliver_followup(sid):
         return None, None
     if time.time() - record.get("created", 0) > FOLLOWUP_TTL:
         target.unlink(missing_ok=True)
-        return None, {"reason": "快照一小時內沒出來，不等了", "key": record.get("key")}
+        return None, {"reason": t("快照一小時內沒出來，不等了", 'Snapshot did not appear within an hour; stop waiting'), "key": record.get("key")}
     states = state_by_message(sid)
     hits, shown = [], set()
     for row in record["rows"]:
@@ -418,8 +419,8 @@ def deliver_followup(sid):
     if not hits:
         return None, None  # 快照還沒出來，下一句再看
     target.unlink(missing_ok=True)
-    text = ("〔剛才壓縮後補回的原話，交接快照現在產好了，補上它們後來的狀態。快照是模型從原文整理的、沒人工核；"
-            "跟摘要或更晚的原話衝突時以後者為準。〕\n" + "\n".join(hits))
+    text = (t("〔剛才壓縮後補回的原話，交接快照現在產好了，補上它們後來的狀態。快照是模型從原文整理的、沒人工核；"
+            "跟摘要或更晚的原話衝突時以後者為準。〕\n", '[A handoff snapshot is now available for the original wording restored after compaction; later states are added below. The snapshot is model-generated from the originals and not human-reviewed; if it conflicts with the summary or later wording, prefer the latter.]\n') + "\n".join(hits))
     return text, {"key": record.get("key"), "followup": len(hits), "waiting": len(record["rows"])}
 
 
@@ -447,7 +448,7 @@ def sentences(msgs):
                     continue  # 工具前的過場句
                 r = role
                 units.append({"role": r, "time": m["time"], "msg": mi, "id": m.get("id"),
-                              "text": s[:400] + ("…（截斷）" if len(s) > 400 else "")})
+                              "text": s[:400] + (t("…（截斷）", '... (truncated)') if len(s) > 400 else "")})
     return units
 
 
@@ -527,18 +528,18 @@ def run(path, cut=None, sid="", hook=False, prompt=False):
         else:
             summary, msgs, fresh, when = wait_fresh(path, t0)
         if not fresh:
-            return None, {"reason": "等不到這次的摘要", "summary": len(summary), "msgs": len(msgs), "waited": round(time.time() - t0, 1)}
+            return None, {"reason": t("等不到這次的摘要", 'Timed out waiting for this compaction summary'), "summary": len(summary), "msgs": len(msgs), "waited": round(time.time() - t0, 1)}
         key = event_key(path, sid, when, summary)
         if key in emitted():  # hook 重送、或同一次壓縮觸發兩次
-            return None, {"reason": "這次壓縮已經補過", "key": key}
+            return None, {"reason": t("這次壓縮已經補過", 'Already restored this compaction'), "key": key}
         if pending and not pending_is_current(path, sid, pending):
-            return None, {"reason": "送出前又有新的壓縮，這批作廢", "key": key}
+            return None, {"reason": t("送出前又有新的壓縮，這批作廢", 'A newer compaction arrived before delivery; discard this batch'), "key": key}
     else:
         summary, msgs, _ = segment(path)
     if cut:
         summary = "\n".join(l for l in summary.splitlines() if not any(c.lower() in l.lower() for c in cut))
     if not summary or not msgs:
-        return None, {"reason": "沒有摘要或原話", "summary": len(summary), "msgs": len(msgs)}
+        return None, {"reason": t("沒有摘要或原話", 'No summary or original wording'), "summary": len(summary), "msgs": len(msgs)}
     recall = load_recall()
     units = sentences(msgs)
     if not units:
@@ -574,7 +575,7 @@ def run(path, cut=None, sid="", hook=False, prompt=False):
         later = ""
         if k in stale:
             j = max(range(k + 1, len(units)), key=lambda j: sum(a * b for a, b in zip(space[0][j], space[0][k])))
-            later = f"；{local(units[j]['time'])[11:]} 又談過，以較晚的為準"
+            later = t(f"；{local(units[j]['time'])[11:]} 又談過，以較晚的為準", f'''; discussed again at {local(units[j]['time'])[11:]}; prefer the later record''')
         lines.append(f"- {local(u['time'])} {u['role']}：{text}（ranker {score_of[k]:.2f}{later}）")
         refs.append((u.get("id"), f"{local(u['time'])} {u['role']}：{u['text'][:40]}{'…' if len(u['text']) > 40 else ''}"))
     stat = {"summary": len(summary), "msgs": len(msgs), "sentences": len(units), "pool": len(pool), "coverage": note,
@@ -591,15 +592,15 @@ def run(path, cut=None, sid="", hook=False, prompt=False):
         # ranker 要跑幾十秒：送出前再確認沒有更新的壓縮，免得把上一次的補丁送進下一段
         _, _, now_when = segment(path)
         if (pending and not pending_is_current(path, sid, pending)) or (not pending and now_when != when):
-            return None, {**stat, "reason": "送出前又有新的壓縮，這批作廢", "key": key}
+            return None, {**stat, "reason": t("送出前又有新的壓縮，這批作廢", 'A newer compaction arrived before delivery; discard this batch'), "key": key}
         emitted(key)
         save_followup(sid, key, [{"id": mid, "line": ref} for mid, ref in refs if mid in set(missing)])
         if pending:
             consume_pending(sid, pending)
         stat["key"] = key
         stat["summary_source"] = "PostCompact" if pending else "transcript"
-    text = ("〔摘要沒蓋到的原話：本機覆蓋比對與可選排序模型挑出的候選。"
-            "只當提示：跟摘要衝突時，核對時間並以較晚的記錄為準；完整前後文請查原始 transcript。〕\n"
+    text = (t("〔摘要沒蓋到的原話：本機覆蓋比對與可選排序模型挑出的候選。"
+            "只當提示：跟摘要衝突時，核對時間並以較晚的記錄為準；完整前後文請查原始 transcript。〕\n", '[Original wording not covered by the summary: candidates selected by local coverage comparison and an optional ranking model. Hints only: if they conflict with the summary, check timestamps and prefer the later record; consult the original transcript for full context.]\n')
             + "\n".join(lines))
     return text, stat
 

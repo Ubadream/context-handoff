@@ -15,6 +15,8 @@ from pathlib import Path
 
 from cw_paths import WIFE_COMPACT_STATE  # noqa: E402
 
+from cw_lang import t
+
 OFF = WIFE_COMPACT_STATE / "DIET_OFF"
 PLUGIN = Path(__file__).resolve().parent / "wife-compact" / "hooks" / "wife-compact.ts"
 
@@ -32,10 +34,10 @@ def show():
     return {
         "enabled": not OFF.exists(),
         "switch_file": str(OFF),
-        "applies": "重開 Claude 後",
+        "applies": t("重開 Claude 後", 'After restarting Claude'),
         "deferred_tools": names,
         "deferred_prefixes": prefixes,
-        "skill_listing": "每個技能留「做什麼」＋「什麼時候用」兩句",
+        "skill_listing": t("每個技能留「做什麼」＋「什麼時候用」兩句", 'Keep two sentences per skill: what it does and when to use it'),
     }
 
 
@@ -45,9 +47,9 @@ def main():
         OFF.unlink(missing_ok=True)
     elif cmd == "off":
         OFF.parent.mkdir(parents=True, exist_ok=True)
-        OFF.write_text("瘦身關閉：wife-compact 的工具延後與技能清單縮短都不做。刪掉這個檔（或 cw_diet.py on）再重開就恢復。\n", encoding="utf-8")
+        OFF.write_text(t("瘦身關閉：wife-compact 的工具延後與技能清單縮短都不做。刪掉這個檔（或 cw_diet.py on）再重開就恢復。\n", 'Diet disabled: wife-compact will not defer tools or shorten skill listings. Delete this file (or run cw_diet.py on) and restart to restore.\n'), encoding="utf-8")
     elif cmd != "show":
-        sys.exit("用法：cw_diet.py show|on|off")
+        sys.exit(t("用法：cw_diet.py show|on|off", 'Usage: cw_diet.py show|on|off'))
     sys.stdout.buffer.write((json.dumps(show(), ensure_ascii=False, indent=1) + "\n").encode("utf-8"))
 
 
