@@ -40,7 +40,7 @@ jobs:
       - name: wife-compact plugin tests (simulated host; continue/wait, handoff IDs, nesting, tool lines)
         run: |
           node --version
-          for t in continue handoff_ids nesting tools; do
+          for t in continue handoff_ids nesting tools language; do
             CW_TEST_PYTHON=python3 node "adapters/claude/wife-compact/tests/$t.mjs"
           done
   codex-hooks:

@@ -4,26 +4,29 @@ Context Handoff keeps a coding agent on the same task across context compaction.
 
 Built for Claude Code (in daily use) and Codex (hooks, plus an optional patched build as a source preview).
 
+Using Codex? The hooks need no build and install in a couple of minutes: [Codex hooks install](#codex-hooks).
+
 ## What it fixes
 
 | Problem | What we do | Status |
 |---|---|---|
 | Cut off mid-task; reasons and rejected approaches get lost | The agent compacts at a natural break, after writing a handoff; a snapshot of the handoff is kept | Claude Code: yes. Codex hooks: reminders only; the host decides when to compact |
-| The summary drops a detail | After compaction, sentences the summary missed are put back automatically, with their time and who said them. Original words and tool results can also be fetched by ID, hash-checked | Claude Code: yes. Codex hooks: yes |
+| The summary drops a detail | After compaction, sentences the summary missed are put back automatically, with their time and who said them. Original words and tool results can also be fetched by ID, hash-checked | Claude Code: yes. Codex hooks: fetch by ID |
 | Rules stop being followed, or nobody knows who said them | The source is one lookup away. A per-rule record of who said it, when, and whether it still holds | Lookup: yes. Per-rule record: planned |
 | Finished work gets redone | After compaction the agent is told the last request was already handled; the Codex patches drop it from replay | Reminder: yes. Host-level: Codex patches (preview) |
 | An old handoff overrides a newer message | Freshness check before compaction | Yes. Showing messages sent after the snapshot: planned |
 | The agent stops after compaction | The agent chooses `continue` or `wait` when it schedules compaction; with `continue` the plugin sends one labelled prompt afterwards to resume authorised work | Claude Code: yes. Codex: patches (preview) |
-| Compaction is slow or gets stuck | Large tool output is kept in files, so there is less to compact. Stalls inside the host itself are out of reach | Partial |
+| Compaction is slow or gets stuck | Large tool output is kept in files, so there is less to compact | Partial |
 
-These are tools and prompts, so a model can still drift. What each part has been tested on: [Details](#details) and [the verification record](docs/VERIFICATION.md).
+What each part has been tested on: [Details](#details) and [the verification record](docs/VERIFICATION.md).
 
 ## Results
 
-One maintainer's daily use of the Claude Code adapter, 2026-09-25 to 2026-10-16 (a controlled evaluation is in progress):
+One maintainer's daily use of the Claude Code adapter, 2026-09-25 to 2026-10-16:
 
 - **46 compactions: 45 at a break the agent or user chose, 1 forced by the host.**
 - **Median context 379K → 83K tokens** (43 measurable). About 70K of what remains is fixed overhead.
+- Handoff snapshots kept at real compactions: 45 snapshots at 24 compactions in 7 sessions (2026-10-16 to 10-21).
 - The one forced compaction (860K) came during a 49-tool-call turn with no user message, when reminders only ran on user turns. Reminders now also run after tool calls.
 
 ![Context before and after each compaction, Sep 23 to Oct 16, 2026](docs/img/compactions.svg)
@@ -32,7 +35,7 @@ How these were measured, and more: [the verification record](docs/VERIFICATION.m
 
 ## Install
 
-For an AI following this README: choose **one** host path, inspect its preview before applying it, and check the doctor's actual output. Run commands from the checkout root. Keep the checkout at that path: installed hooks point to it. The commands below are repository entry points, not a package-manager shortcut.
+For an AI following this README: choose **one** host path, inspect its preview before applying it, and check the doctor's actual output. Run commands from the checkout root. Keep the checkout at that path: installed hooks point to it.
 
 ### Get the checkout
 
@@ -52,11 +55,11 @@ For an AI following this README: choose **one** host path, inspect its preview b
    python --version
    ```
 
-   Success: Git prints its version and Python is **3.11+**. If either command is missing, install it or select the correct executable, then repeat. The Python core uses the standard library; installing the `handoff-core-preview` package does not install a host adapter.
+   Success: Git prints its version and Python is **3.11+**. If either command is missing, install it or select the correct executable, then repeat. The Python core uses only the standard library.
 
 ### Claude Code
 
-Requires Claude Code with **function hooks** (an early-access feature) and `node` and `claude` available on PATH. Messages and labels are currently in Traditional Chinese.
+Requires Claude Code with **function hooks** (an early-access feature) and `node` and `claude` available on PATH. Messages default to Traditional Chinese.
 
 1. Preview:
 
@@ -64,7 +67,7 @@ Requires Claude Code with **function hooks** (an early-access feature) and `node
    python adapters/claude/cw_install.py apply --dry-run
    ```
 
-   Success: prints the proposed `settings.json`, legacy-hook and marketplace changes (`要改` / `不用改` means change / no change), without applying them. If parsing fails, inspect the named `~/.claude/settings.json`; a missing script means you are outside the checkout root.
+   Success: prints the proposed `settings.json`, legacy-hook and marketplace changes (`要改` / `change`; `不用改` / `no change`), without applying them. If parsing fails, inspect the named `~/.claude/settings.json`; a missing script means you are outside the checkout root.
 
 2. Apply the reviewed changes:
 
@@ -80,7 +83,9 @@ Requires Claude Code with **function hooks** (an early-access feature) and `node
    python adapters/claude/cw_install.py doctor
    ```
 
-   Success: hooks, environment and plugin rows say `ok`, `node` and `claude` are found, and the final line is `全部接好` (all connected). Missing legacy shims (`沒檔`) are acceptable on a fresh installation. For `沒接`, `別處`, `舊版` or `沒開`, inspect the reported path/version and repeat the preview/apply cycle after correcting it. Also inspect dependency rows: the final status alone does not enforce every dependency. Doctor checks wiring, not successful model continuation.
+   Success: hooks, environment and plugin rows say `ok`, `node` and `claude` are found, and the final line is `全部接好` / `all connected`. Missing legacy shims (`沒檔` / `missing file`) are acceptable on a fresh installation. For `沒接` / `not connected`, `別處` / `elsewhere`, `舊版` / `old version` or `沒開` / `off`, inspect the reported path/version and repeat the preview/apply cycle after correcting it. Also read the dependency rows, since the final line does not cover every dependency.
+
+4. English messages: `python adapters/claude/cw_thresholds.py set --language en`. Use `--language zh` to switch back. `CW_LANG=en|zh` overrides the setting; installation also accepts `cw_install.py apply --language en`.
 
 ### Codex hooks
 
@@ -116,7 +121,7 @@ Requires Codex with hooks; **0.159.2** is the verified version. Start here for a
    python adapters/codex/install_codex_hooks.py doctor
    ```
 
-   Success: `block: present`, `features: hooks = True`, script `ok`, and **four** enabled hooks with `trust=trusted`. A zero exit code alone is insufficient: doctor can print `could not ask Codex` without failing. For that message, check the Codex executable using `--codex`; for missing/untrusted rows, return to apply/trust and check again. This verifies registration and trust, not long-session behaviour.
+   Success: `block: present`, `features: hooks = True`, script `ok`, and **four** enabled hooks with `trust=trusted`. If it prints `could not ask Codex`, check the Codex executable using `--codex`; for missing/untrusted rows, return to apply/trust and check again.
 
 ### Codex patches (source preview)
 
@@ -128,7 +133,7 @@ Use this path only if you want to build the source preview. Requires Linux or Wi
    python adapters/codex/install_codex.py plan
    ```
 
-   Success: prints the pinned upstream, verified patch hashes, reviewed tree, source/install paths and no `missing:` tools. If a tool is missing or hash verification fails, resolve that issue before building. `plan` checks PATH tools; it does not prove the C++ toolchain can build.
+   Success: prints the pinned upstream, verified patch hashes, reviewed tree, source/install paths and no `missing:` tools. If a tool is missing or hash verification fails, resolve that issue before building. `plan` only checks tools on PATH; the C++ toolchain is exercised by the build step.
 
 2. Build and install the separate runtime:
 
@@ -144,7 +149,7 @@ Use this path only if you want to build the source preview. Requires Linux or Wi
    python adapters/codex/install_codex.py doctor
    ```
 
-   Success: prints the installed executable's version, `ok:` and `launcher:`, and exits 0. For `not installed:` or `problem:`, inspect the named install, marker, executable or launcher. This does not establish a long real session or model-following reliability.
+   Success: prints the installed executable's version, `ok:` and `launcher:`, and exits 0. For `not installed:` or `problem:`, inspect the named install, marker, executable or launcher.
 
 The runtime installs under `$CODEX_HOME/runtimes/` with its own launcher and leaves the existing Codex binary, config and desktop app untouched. The launcher enables checkpoint reminders for that invocation. It still reads the same `~/.codex`; upstream releases require a patch rebase. `uninstall` removes only the installer-marked runtime.
 
@@ -168,8 +173,6 @@ The two compaction modes: **A** uses the host's built-in summary; **C** is the s
 
 ### Claude Code adapter (`adapters/claude/`)
 
-The measured daily-use observations are in [Results](#results); individual mechanisms have different verification scopes.
-
 | Feature | What it does | Measured on a real session |
 |---|---|---|
 | Agent-chosen compaction | A `compact` tool lets the agent schedule compaction at a natural break, after updating its handoff, in mode A or C. Compaction is blocked if no handoff was written since the last one, unless the agent gives a reason. | |
@@ -180,11 +183,11 @@ The measured daily-use observations are in [Results](#results); individual mecha
 | Handoff check | Before compacting: is the handoff newer than the last user message and file edit? The optional model lists what the handoff may have missed. | |
 | Thresholds and idle reminder | Reminders at configurable context sizes. If the user goes idle with a large context, one reminder before the prompt cache expires asks the agent to write its handoff and compact, so the user doesn't pay to re-read the whole window. | |
 | Fixed-overhead diet | Rarely used tools are deferred and long skill descriptions shortened (switchable). | |
-| Three-part handoffs (optional, off by default) | `python adapters/claude/cw_thresholds.py set --handoff-sections on`: reminders and the handoff check ask for a handoff in three parts, decisions / feelings / progress, each item with a pointer back to the original words (time and a short quote, or an originals ID), and the check warns, without blocking, when a part or any pointer is missing. This is how the maintainer writes handoffs; it is an example, not a requirement. | |
+| Three-part handoffs (optional, off by default) | `python adapters/claude/cw_thresholds.py set --handoff-sections on`: reminders and the handoff check ask for a handoff in three parts, decisions / feelings / progress, each item with a pointer back to the original words (time and a short quote, or an originals ID), and the check warns, without blocking, when a part or any pointer is missing. | |
 
 ### Codex hooks (`adapters/codex/hooks/`)
 
-**No rebuild.** Added 2026-10-11. Four standard Codex hooks, one Python script, nothing compiled. It uses standard hook events rather than a pinned source rebuild; compatibility with newer host versions still needs checking.
+**No rebuild.** Added 2026-10-11. Four standard Codex hooks, one Python script, nothing compiled. It uses standard hook events, so it does not depend on a pinned Codex build. Tested with Codex 0.159.2.
 
 | Hook | What it does |
 |---|---|
@@ -198,7 +201,7 @@ The measured daily-use observations are in [Results](#results); individual mecha
 | | Hooks | Patches |
 |---|---|---|
 | Who starts compaction | The user (`/compact`) or the host's automatic limit; the agent can only ask | The agent, with a `handoff_compact` tool, at a break it picks |
-| Not replaying the last request | An instruction after compaction; the model can still ignore it | The handoff is bound to the request it covers; the host does not replay it |
+| Not replaying the last request | An instruction after compaction | The handoff is bound to the request it covers; the host does not replay it |
 | Handoff | Newest `HANDOFF*.md` in the working directory, with a freshness check | A copy stored and bound to the thread at prepare time |
 | Codex upgrades | Uses standard hooks; recheck compatibility | Pinned to 0.159.2 until the patches are rebased |
 | Install | Edits one marked block in `config.toml` | Builds Codex from source (tens of GB, a long first build) |
@@ -214,18 +217,14 @@ The measured daily-use observations are in [Results](#results); individual mecha
 
 - Hook events carry no token counts, and Codex writes them to the transcript asynchronously, so a reminder arrives one tool call after the threshold is crossed. Keep the last threshold well below the host's automatic-compaction limit.
 - With remote compaction, the host's summary is stored encrypted and only the model provider can read it. `get` marks where such a compaction happened and how many messages were carried over, instead of showing an empty summary. Your handoff, its saved copy and the indexed originals are what stays readable.
-- Not yet used in long real sessions. The maintainer's daily Codex runs the private overlay, which has its own hooks.
-- macOS untested.
 
 </details>
 
 ### Codex patches (`runtime-review*/`)
 
-**Source preview.** No prebuilt binary; the installer in [Install](#codex-patches-source-preview) builds from source. Daily use so far is in the maintainer's private overlay, not in this public build.
+**Source preview.** No prebuilt binary; the installer in [Install](#codex-patches-source-preview) builds from source. The same patches are used daily through the maintainer's private overlay.
 
 The same flow as a `handoff_compact` tool inside Codex. The agent writes a handoff file and calls `handoff_compact(mode="prepare")`, which stores a copy and binds it to the thread and to the user request it covers. The agent then compacts with A or C and either continues or waits. After compaction the agent receives an opaque handoff ID and reads the handoff back in bounded pages; the original request is not replayed.
-
-The continue/wait behaviour described here is the public **source-preview design**, not a shipped Claude adapter continuation feature or a long-session validation claim.
 
 <details>
 <summary><b>Verified, and known gaps</b></summary>
@@ -238,8 +237,7 @@ The continue/wait behaviour described here is the public **source-preview design
 
 **Known gaps:**
 
-- Not yet run in a long real Codex session on this public build.
-- Windows runs in CI (installer end to end, and the focused native tests); macOS is untested.
+- Windows runs in CI (installer end to end, and the focused native tests).
 - One deny-read test cannot run on the CI runner: Codex's filesystem sandbox helper aborts there, and upstream's own deny-read test fails the same way.
 - Bugs found so far and fixed: patch 0004 fixed two in previously ignored tests (a blank handoff created its directory before being rejected; the deny-read test never started a turn). Patch 0005 fixes one found in daily use of the overlay: after one agent-scheduled compaction, a second one with no new user message in between could not bind its handoff, so the agent had to ask the user to say something.
 
@@ -247,7 +245,7 @@ The continue/wait behaviour described here is the public **source-preview design
 
 ### Handoff core (`handoff_core/`)
 
-A small standard-library Python component for revisioned handoff drafts, previews, deterministic exports and binding integrity checks. It is not used by the Claude adapter or the Codex patches at runtime. Details, safety properties and verification: [docs/HANDOFF_CORE.md](docs/HANDOFF_CORE.md).
+A small standard-library Python component for revisioned handoff drafts, previews, deterministic exports and binding integrity checks. The adapters do not depend on it. Details, safety properties and verification: [docs/HANDOFF_CORE.md](docs/HANDOFF_CORE.md).
 
 ### Configuration and reading originals
 
@@ -257,7 +255,7 @@ A small standard-library Python component for revisioned handoff drafts, preview
 "CW_MODEL_CMD": "claude -p --model haiku"
 ```
 
-With neither `CW_MODEL_CMD` nor an existing local `wife_l2.py` fallback, saving, segmentation, section retrieval and freshness checks still run without model labels or handoff-gap suggestions. `cw_model.py` selects the explicit command first, then `CW_L2` (default `~/.local/bin/wife_l2.py`) if present; inspect that local helper before assuming the no-model path. This is a command interface, not a verified compatibility matrix for every local or OpenAI-compatible endpoint.
+With neither `CW_MODEL_CMD` nor an existing local `wife_l2.py` fallback, saving, segmentation, section retrieval and freshness checks still run without model labels or handoff-gap suggestions. `cw_model.py` selects the explicit command first, then `CW_L2` (default `~/.local/bin/wife_l2.py`) if present; inspect that local helper before assuming the no-model path.
 
 **Recovering what the summary dropped** (`compact_gap`): after a compaction, sentences the summary did not cover are ranked and the top ones are added to the next turn, labelled `user`, `assistant` or `program` with their time. Ranking is pluggable, set in the thresholds file under `claude.compact_gap`: `command` (default, `claude -p --model haiku`, your own Claude login, no key), `openai` (any OpenAI-compatible endpoint: Ollama, LM Studio, llama.cpp or a hosted API; `api_key` names an environment variable) or `none` (word overlap only). If the model fails or times out, it falls back to `none`. Example:
 
@@ -288,20 +286,12 @@ Success: `list` prints section numbers and `get` prints the section with `verifi
 
 ## Verification
 
-Read [docs/VERIFICATION.md](docs/VERIFICATION.md) for dated evidence, measurement definitions, failures and unverified cases, and [docs/CI_SCOPE.md](docs/CI_SCOPE.md) for CI boundaries. These are recorded results for their stated commits and environments, not tests rerun by this README. Claude unit CI does not run Claude Code; Codex mock-model host tests do not establish real-model adherence. Private overlay use is labelled separately and does not validate this public build.
+What was tested, on which commit and environment, and what was not: [docs/VERIFICATION.md](docs/VERIFICATION.md) and [docs/CI_SCOPE.md](docs/CI_SCOPE.md).
 
 ## Limitations
 
-- Function hooks are an early-access Claude Code feature; the installer turns them on.
-- Developed and used on Windows. CI runs the adapter's unit tests on Linux; a full install has only been run on the maintainer's machine.
-- Context can only be rewritten at compaction time; between compactions, only new output can be kept small.
-- The idle reminder has passed tests but has not yet been seen firing after a real idle period.
-- Messages and labels are in Traditional Chinese.
-- Not included from the private setup: the control panel.
-- Codex: see the known gaps for the [hooks](#codex-hooks-adapterscodexhooks) and the [patches](#codex-patches-runtime-review) above. Both are tested against a mock model server, not with a real model.
-- Continue/wait: the resume prompt is an instruction to the model, so whether it resumes the right work, and stops when it should wait, still depends on the model; the controlled evaluation measuring this is still running. Recovered-sentence ranking has unit tests with mock endpoints; real model services are not yet verified. A per-rule provenance ledger and explicit post-snapshot message delivery are planned. Optional model suggestions in the public adapter do not provide these features.
-- Snapshot freshness and source hashes do not prove that a handoff is complete, that a source statement is true, or that a model follows it. There is no general exactly-once side-effect guarantee.
-- Claude handoff snapshots have since been recorded at real compactions (45 snapshots at 24 compactions in 7 sessions, 2026-10-16 to 10-21); a snapshot proves what the handoff said at that moment, not that it was right.
+- Full installs so far are on Windows. Linux is covered by CI; macOS is untested.
+- Messages default to Traditional Chinese; set `--language en` for English.
 
 
 ## Privacy

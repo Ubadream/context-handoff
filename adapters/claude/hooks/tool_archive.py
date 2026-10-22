@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # adapters/claude：共用位置
+from cw_lang import t
 from cw_paths import WORKBENCH_STATE  # noqa: E402
 
 ROOT = WORKBENCH_STATE / "tool-calls"
@@ -25,21 +26,21 @@ BY_SESSION = ROOT / "by-session"  # 對話 id → 這個對話的 {tool_use_id, 
 KEEP_DAYS = 30
 TARGET_KEYS = ("file_path", "notebook_path", "path", "command", "pattern", "url", "query", "description", "skill", "subagent_type")
 GROUPS = [  # 分類：工具名 → 類別
-    (re.compile(r"^(Read|NotebookRead)$"), "讀檔"),
-    (re.compile(r"^(Write|Edit|MultiEdit|NotebookEdit)$"), "寫檔"),
-    (re.compile(r"^(Grep|Glob)$"), "搜尋"),
-    (re.compile(r"^(Bash|PowerShell)$"), "指令"),
-    (re.compile(r"^(WebFetch|WebSearch)$"), "網路"),
-    (re.compile(r"^mcp__(Claude_Browser|claude-in-chrome)__"), "瀏覽器"),
-    (re.compile(r"^mcp__computer-use__"), "電腦操作"),
-    (re.compile(r"^(Agent|Task|SendMessage)$"), "子代理"),
-    (re.compile(r"^(Skill|ToolSearch)$"), "技能與工具"),
+    (re.compile(r"^(Read|NotebookRead)$"), t("讀檔", 'Read files')),
+    (re.compile(r"^(Write|Edit|MultiEdit|NotebookEdit)$"), t("寫檔", 'Write files')),
+    (re.compile(r"^(Grep|Glob)$"), t("搜尋", 'Search')),
+    (re.compile(r"^(Bash|PowerShell)$"), t("指令", 'Command')),
+    (re.compile(r"^(WebFetch|WebSearch)$"), t("網路", 'Network')),
+    (re.compile(r"^mcp__(Claude_Browser|claude-in-chrome)__"), t("瀏覽器", 'Browser')),
+    (re.compile(r"^mcp__computer-use__"), t("電腦操作", 'Computer use')),
+    (re.compile(r"^(Agent|Task|SendMessage)$"), t("子代理", 'Subagent')),
+    (re.compile(r"^(Skill|ToolSearch)$"), t("技能與工具", 'Skills and tools')),
     (re.compile(r"^mcp__"), "MCP"),
 ]
 
 
 def group(tool):
-    return next((name for pat, name in GROUPS if pat.search(tool)), "其他")
+    return next((name for pat, name in GROUPS if pat.search(tool)), t("其他", 'Other'))
 
 
 def target(tool, tool_input):
@@ -65,7 +66,7 @@ def strip_images(obj):
     """截圖回傳的 base64 很大，面板要的是發生了什麼；只留長度。"""
     if isinstance(obj, dict):
         if obj.get("type") == "image" or ("data" in obj and isinstance(obj.get("data"), str) and len(obj["data"]) > 2000):
-            return {k: (f"〔base64 {len(v)} 字，未存〕" if k == "data" and isinstance(v, str) else strip_images(v)) for k, v in obj.items()}
+            return {k: (t(f"〔base64 {len(v)} 字，未存〕", f'''[base64: {len(v)} characters, not stored]''') if k == "data" and isinstance(v, str) else strip_images(v)) for k, v in obj.items()}
         return {k: strip_images(v) for k, v in obj.items()}
     if isinstance(obj, list):
         return [strip_images(v) for v in obj]

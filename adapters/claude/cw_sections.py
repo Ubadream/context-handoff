@@ -22,6 +22,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 import cw_claude  # noqa: E402
 import cw_segments  # noqa: E402
 
+from cw_lang import t
+
 OUT = Path(os.environ.get("CW_ORIGINALS", cw_claude.STATE / "context-workbench" / "originals"))
 INDEX_LINES = 40  # 目錄最多列幾節（給上下文看的；清單本身全收）
 
@@ -42,9 +44,9 @@ def opener(text, n=36):
 def index_lines(manifest):
     secs = manifest["sections"]
     rows = [f"§{s['n']} {s['start'][11:16]} {s['opened_by']}「{s['opener']}」"
-            + (f"（工具 {s['tools']}）" if s["tools"] else "") for s in secs[:INDEX_LINES]]
+            + (t(f"（工具 {s['tools']}）", f''' (tools {s['tools']})''') if s["tools"] else "") for s in secs[:INDEX_LINES]]
     if len(secs) > INDEX_LINES:
-        rows.append(f"…另有 {len(secs) - INDEX_LINES} 節，用 list {manifest['id']} 看全部")
+        rows.append(t(f"…另有 {len(secs) - INDEX_LINES} 節，用 list {manifest['id']} 看全部", f'''... {len(secs) - INDEX_LINES} more sections; use list {manifest['id']} to see all'''))
     return rows
 
 
@@ -52,7 +54,7 @@ def build(session):
     path = cw_claude.find_session(session)
     segs = cw_segments.segment(path)
     if not segs:
-        sys.exit(f"{path.stem[:8]} 上一次壓縮之後沒有老公開頭的段，沒東西可分節")
+        sys.exit(t(f"{path.stem[:8]} 上一次壓縮之後沒有老公開頭的段，沒東西可分節", f'''{path.stem[:8]} has no user-opened segments since the last compaction; nothing to index'''))
     now = datetime.now()
     oid = f"{path.stem[:8]}@{now.strftime('%Y%m%dT%H%M%S')}"
     sections = [{
@@ -87,18 +89,18 @@ def build(session):
 def load(oid):
     p = OUT / f"{oid.replace('@', '_')}.json"
     if not p.exists():
-        sys.exit(f"找不到原文 {oid} 的分節清單（{p}）")
+        sys.exit(t(f"找不到原文 {oid} 的分節清單（{p}）", f'''Section index not found for original {oid} ({p})'''))
     return json.loads(p.read_text(encoding="utf-8"))
 
 
 def main():
-    ap = argparse.ArgumentParser(description="原文分節：固定的節號清單，引用寫 <原文ID>§<節號>")
+    ap = argparse.ArgumentParser(description=t("原文分節：固定的節號清單，引用寫 <原文ID>§<節號>", 'Index original text into fixed sections; cite <original ID>§<section number>'))
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("build").add_argument("session")
     sub.add_parser("list").add_argument("id")
     args = ap.parse_args()
     m = build(args.session) if args.cmd == "build" else load(args.id)
-    head = f"原文 {m['id']}：{len(m['sections'])} 節，{m['from']} ～ {m['to']}"
+    head = t(f"原文 {m['id']}：{len(m['sections'])} 節，{m['from']} ～ {m['to']}", f'''Original {m['id']}: {len(m['sections'])} sections, {m['from']} - {m['to']}''')
     sys.stdout.buffer.write(("\n".join([head, *index_lines(m)]) + "\n").encode("utf-8"))
 
 

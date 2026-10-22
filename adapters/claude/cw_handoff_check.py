@@ -22,15 +22,17 @@ import cw_claude  # noqa: E402
 import cw_segments  # noqa: E402
 from cw_paths import HANDOFF_REMINDER, handoff_sections  # noqa: E402
 
+from cw_lang import t
+
 OUT = cw_claude.STATE / "context-workbench" / "handoff-checks"
 HANDOFF_TAIL = 8000  # 給 Jev 看的交接尾巴
 PROMPT_VERSION = "handoff-check-v2"  # v2：同一次呼叫多給「現在要不要壓、用哪種」的建議
 WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
 # 開了 handoff_sections（cw_thresholds.py set --handoff-sections on）才加這段；預設照原本五類
-SECTIONS_RULES = ("另外：交接用三塊寫（決策／情感／工作進度）。多列一類 emotion（老婆有感觸處、老公反應與精彩討論），"
-                  "建議寫法依三塊、每條附時間＋原話短句或原文 ID；錯誤只留錯誤簿指向。\n\n")
+SECTIONS_RULES = (t("另外：交接用三塊寫（決策／情感／工作進度）。多列一類 emotion（老婆有感觸處、老公反應與精彩討論），"
+                  "建議寫法依三塊、每條附時間＋原話短句或原文 ID；錯誤只留錯誤簿指向。\n\n", 'Also: organize the handoff into Decisions, Feelings, and Work progress. Add an emotion category (agent reactions, user responses, and notable discussions). Suggestions should follow these sections, each with a timestamp and short quote or original-text ID; reference the error log for errors.\n\n'))
 
-PROMPT = """老婆（助理）準備壓縮上下文，壓縮後她只剩摘要和交接檔。下面是上一次壓縮之後的對話分段，和交接檔的最後一段。
+PROMPT = t("""老婆（助理）準備壓縮上下文，壓縮後她只剩摘要和交接檔。下面是上一次壓縮之後的對話分段，和交接檔的最後一段。
 請找出**交接裡沒寫到、但壓縮後接著做事會需要的東西**，分五類：
 - decision：老公說過的決定、限制、偏好
 - request：老公要求、還沒明確交代結果的事
@@ -59,7 +61,7 @@ PROMPT = """老婆（助理）準備壓縮上下文，壓縮後她只剩摘要�
 
 【上一次壓縮之後的對話分段】
 {segments}
-"""
+""", 'You are preparing to compact context; afterward only the summary and handoff remain. Below are conversation segments since the last compaction and the handoff tail.\nFind **items missing from the handoff that are needed to continue afterward**, in five categories:\n- decision: user decisions, constraints, preferences\n- request: user requests without a clearly reported result\n- done: completed work missing from the handoff (files, versions, verification)\n- open: unfinished, unverified, or blocked work\n- next: where to resume\n\nRules:\n- List only actual omissions; omit anything already covered, even in different words.\n- Give each item a concrete suggested handoff sentence (suggest) in English, with a filename or segment ID.\n- Omit casual chat and feelings unless the user explicitly requested future agent behavior.\n- Include uncertain items and write "uncertain" in why.\n- Return an empty array when nothing is missing.\n\nAlso advise whether to compact now and which mode (advice):\n- now: yes (a work boundary: work finished and the handoff is updated or can be completed) / wait (work or a tool chain is ongoing, or the user message is not fully addressed) / no (context is still small)\n- mode: A (native summary; default at a clean boundary with a fresh handoff) / C (summary plus archived original wording; detailed discussion may need later retrieval)\n- Current context usage: {tokens}\n\nOutput only one JSON object:\n{{"gaps": [{{"kind": "decision|request|done|open|next", "seg": segment_number, "what": "missing item", "suggest": "suggested handoff sentence", "why": "why needed"}}],\n "advice": {{"now": "yes|wait|no", "mode": "A|C", "why": "one or two sentences citing segment IDs"}}}}\n\n[Handoff tail] ({handoff_path})\n{handoff_tail}\n\n[Conversation segments since the last compaction]\n{segments}\n')
 
 
 def load_handoff_bind():
@@ -72,21 +74,22 @@ def load_handoff_bind():
 def format_warnings(text):
     """三塊與至少一處原話定位的軟檢查；不改新鮮度或壓縮許可。"""
     headings = set(re.findall(
-        r"^\s*(?:#{1,6}\s*)?(?:\*\*)?(決策|情感|工作進度)(?:\*\*)?"
+        r"^\s*(?:#{1,6}\s*)?(?:\*\*)?(決策|情感|工作進度|Decisions|Feelings|Work progress)(?:\*\*)?"
         r"(?:[ \t]*[:：].*|[ \t]*(?:[（(].*[）)])?[ \t]*)$", text, re.M))
     warnings = []
-    missing = [name for name in ("決策", "情感", "工作進度") if name not in headings]
+    required = (("決策", "Decisions"), ("情感", "Feelings"), ("工作進度", "Work progress"))
+    missing = [t(zh, en) for zh, en in required if zh not in headings and en not in headings]
     if missing:
-        warnings.append("交接缺少標題：" + "／".join(missing))
+        warnings.append(t("交接缺少標題：", 'Missing handoff headings: ') + "／".join(missing))
     # UUID、段號／節號、明示原文 ID，或同一行的時間與引句。
     locator = re.search(
         r"\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b"
         r"|\b[0-9a-f]{8}#[0-9a-f]{8}\b|\b[\w@.-]+§\d+"
-        r"|原文\s*ID\s*[:：=]\s*[`\"']?[A-Za-z0-9][\w.-]+"
+        r"|(?:原文|original(?:-text)?)\s*ID\s*[:：=]\s*[`\"']?[A-Za-z0-9][\w.-]+"
         r"|(?:\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?|\d{1,2}:\d{2})[^\n]*[「“\"][^」”\"\n]+[」”\"]",
         text, re.I)
     if not locator:
-        warnings.append("交接沒有原話定位：補時間＋原話短句或原文 ID")
+        warnings.append(t("交接沒有原話定位：補時間＋原話短句或原文 ID", 'Handoff has no original-text reference: add a timestamp and short quote or original-text ID'))
     return warnings
 
 
@@ -122,7 +125,7 @@ def facts(path):
         try:
             warnings = format_warnings(Path(latest[0]).read_text(encoding="utf-8"))
         except (OSError, UnicodeError):
-            warnings = ["交接格式未檢查：交接檔無法讀取"]
+            warnings = [t("交接格式未檢查：交接檔無法讀取", 'Handoff format not checked: cannot read the handoff file')]
     return {
         "session_file": str(Path(path).resolve()),
         "format_warnings": warnings,
@@ -137,24 +140,24 @@ def facts(path):
 def verdict(f):
     """給老婆看的一句話；程式只說事實，要不要補由她定。"""
     if not f["handoffs"]:
-        return "這個對話還沒寫過交接。"
+        return t("這個對話還沒寫過交接。", 'This session has no handoff yet.')
     if not f["written_since_compaction"]:
-        return f"上一次壓縮（{f['last_compaction']}）之後還沒更新交接。"
+        return t(f"上一次壓縮（{f['last_compaction']}）之後還沒更新交接。", f'''Handoff has not been updated since the last compaction ({f['last_compaction']}).''')
     if f["said_after_handoff"] or f["edits_after_handoff"]:
-        return f"交接最後寫在 {f['handoffs'][0]['written_at']}，之後老公又說了 {f['said_after_handoff']} 句、改了 {f['edits_after_handoff']} 次檔。"
-    return f"交接最後寫在 {f['handoffs'][0]['written_at']}，之後沒有新的老公發話或改檔。"
+        return t(f"交接最後寫在 {f['handoffs'][0]['written_at']}，之後老公又說了 {f['said_after_handoff']} 句、改了 {f['edits_after_handoff']} 次檔。", f'''Handoff last written at {f['handoffs'][0]['written_at']}; since then, {f['said_after_handoff']} user messages and {f['edits_after_handoff']} file edits.''')
+    return t(f"交接最後寫在 {f['handoffs'][0]['written_at']}，之後沒有新的老公發話或改檔。", f'''Handoff last written at {f['handoffs'][0]['written_at']}; no user messages or file edits since then.''')
 
 
 def jev_gaps(path, f, tokens=None):
     segs = cw_segments.segment(path)
-    tail = "（這個對話沒寫過交接）"
+    tail = t("（這個對話沒寫過交接）", '(This session has no handoff)')
     handoff_path = "-"
     if f["handoffs"]:
         handoff_path = f["handoffs"][0]["path"]
         text = Path(handoff_path).read_text(encoding="utf-8", errors="ignore")
         tail = text[-HANDOFF_TAIL:]
-    template = PROMPT.replace("【交接檔最後一段】", SECTIONS_RULES + "【交接檔最後一段】") if handoff_sections() else PROMPT
-    prompt = template.format(handoff_path=handoff_path, handoff_tail=tail, tokens=f"{tokens:,} token" if tokens else "不知道",
+    template = PROMPT.replace(t("【交接檔最後一段】", '[Handoff tail]'), SECTIONS_RULES + t("【交接檔最後一段】", '[Handoff tail]')) if handoff_sections() else PROMPT
+    prompt = template.format(handoff_path=handoff_path, handoff_tail=tail, tokens=f"{tokens:,} token" if tokens else t("不知道", 'unknown'),
                            segments="\n\n".join(cw_segments.excerpt(s) for s in segs))
     try:
         text, secs = cw_segments.cw_model.ask(prompt)
@@ -167,7 +170,7 @@ def jev_gaps(path, f, tokens=None):
     except ValueError:
         out = None
     if not isinstance(out, dict) or not isinstance(out.get("gaps"), list):
-        sys.exit(f"Jev 回的不是約定格式：{text[:300]}")
+        sys.exit(t(f"Jev 回的不是約定格式：{text[:300]}", f'''Jev returned an unexpected format: {text[:300]}'''))
     ids = {s["seq"]: s["id"] for s in segs}
     gaps = [g for g in out["gaps"] if isinstance(g, dict)]
     for g in gaps:
@@ -177,35 +180,35 @@ def jev_gaps(path, f, tokens=None):
 
 
 def markdown(sid8, f, gaps, advice=None):
-    lines = [f"# 交接檢查：{sid8}", "", f"**{verdict(f)}**", ""]
+    lines = [t(f"# 交接檢查：{sid8}", f'''# Handoff check: {sid8}'''), "", f"**{verdict(f)}**", ""]
     if handoff_sections():
         lines += [HANDOFF_REMINDER, ""]
-    lines += [f"- 軟性提醒（不擋壓縮）：{warning}" for warning in f.get("format_warnings", [])]
+    lines += [t(f"- 軟性提醒（不擋壓縮）：{warning}", f'''- Advisory (does not block compaction): {warning}''') for warning in f.get("format_warnings", [])]
     if f["handoffs"]:
-        lines += [f"- 交接檔：`{h['path']}`（{h['written_at']}）" for h in f["handoffs"]]
+        lines += [t(f"- 交接檔：`{h['path']}`（{h['written_at']}）", f'''- Handoff: `{h['path']}` ({h['written_at']})''') for h in f["handoffs"]]
     if advice:
-        now = {"yes": "現在是段落點，可以壓", "wait": "先別壓，還在做", "no": "不必壓"}.get(advice.get("now"), advice.get("now"))
-        lines += ["", f"**Jev 對時機與模式的建議**：{now}；模式 {advice.get('mode')}。{advice.get('why') or ''}（只是建議，老婆定）"]
+        now = {"yes": t("現在是段落點，可以壓", 'At a work boundary; compaction is suitable'), "wait": t("先別壓，還在做", 'Wait; work is ongoing'), "no": t("不必壓", 'No compaction needed')}.get(advice.get("now"), advice.get("now"))
+        lines += ["", t(f"**Jev 對時機與模式的建議**：{now}；模式 {advice.get('mode')}。{advice.get('why') or ''}（只是建議，老婆定）", f'''**Jev timing and mode advice**: {now}; mode {advice.get('mode')}. {advice.get('why') or ''} (advisory; you decide)''')]
     if gaps is None:
         return "\n".join(lines) + "\n"
-    names = {"decision": "決定／限制", "emotion": "情感", "request": "老公的要求", "done": "做完沒記", "open": "未完／未驗", "next": "下一手"}
-    lines += ["", f"## Jev 覺得交接可能漏的（{len(gaps)} 條；只是建議，要不要寫由老婆定）", ""]
+    names = {"decision": t("決定／限制", 'Decisions/constraints'), "emotion": t("情感", 'Feelings'), "request": t("老公的要求", 'User requests'), "done": t("做完沒記", 'Completed but unrecorded'), "open": t("未完／未驗", 'Unfinished/unverified'), "next": t("下一手", 'Next step')}
+    lines += ["", t(f"## Jev 覺得交接可能漏的（{len(gaps)} 條；只是建議，要不要寫由老婆定）", f'''## Possible handoff omissions from Jev ({len(gaps)} items; advisory, you decide what to include)'''), ""]
     if not gaps:
-        lines.append("沒有。")
+        lines.append(t("沒有。", 'None.'))
     for g in gaps:
-        lines.append(f"- 〔{names.get(g.get('kind'), g.get('kind'))}｜段 {g.get('seg')} `{g.get('segment_id') or '-'}`〕{g.get('what')}")
-        lines.append(f"  - 建議寫：{g.get('suggest')}")
+        lines.append(t(f"- 〔{names.get(g.get('kind'), g.get('kind'))}｜段 {g.get('seg')} `{g.get('segment_id') or '-'}`〕{g.get('what')}", f'''- [{names.get(g.get('kind'), g.get('kind'))} | segment {g.get('seg')} `{g.get('segment_id') or '-'}`] {g.get('what')}'''))
+        lines.append(t(f"  - 建議寫：{g.get('suggest')}", f'''  - Suggested text: {g.get('suggest')}'''))
         if g.get("why"):
-            lines.append(f"  - 為什麼：{g.get('why')}")
+            lines.append(t(f"  - 為什麼：{g.get('why')}", f'''  - Why: {g.get('why')}'''))
     return "\n".join(lines) + "\n"
 
 
 def main():
-    ap = argparse.ArgumentParser(description="壓縮前交接檢查（只讀）")
+    ap = argparse.ArgumentParser(description=t("壓縮前交接檢查（只讀）", 'Pre-compaction handoff check (read-only)'))
     ap.add_argument("session")
     ap.add_argument("--no-model", action="store_true")
     ap.add_argument("--json", action="store_true")
-    ap.add_argument("--tokens", type=int, help="目前上下文用量，給 Jev 判斷時機")
+    ap.add_argument("--tokens", type=int, help=t("目前上下文用量，給 Jev 判斷時機", 'Current context usage for Jev timing advice'))
     args = ap.parse_args()
     path = cw_claude.find_session(args.session)
     f = facts(path)

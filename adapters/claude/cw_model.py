@@ -12,6 +12,8 @@ import subprocess
 import time
 from pathlib import Path
 
+from cw_lang import t
+
 L2 = Path(os.environ.get("CW_L2") or Path.home() / ".local" / "bin" / "wife_l2.py")
 L2_MODEL = "gemini-3.8-flash-high"
 TIMEOUT = 300
@@ -39,7 +41,7 @@ def ask(prompt):
         r = subprocess.run(argv, input=prompt, capture_output=True, text=True, encoding="utf-8",
                            errors="replace", timeout=TIMEOUT, shell=os.name == "nt")
         if r.returncode:
-            raise RuntimeError(f"CW_MODEL_CMD 結束碼 {r.returncode}：{(r.stderr or r.stdout)[-500:]}")
+            raise RuntimeError(t(f"CW_MODEL_CMD 結束碼 {r.returncode}：{(r.stderr or r.stdout)[-500:]}", f'''CW_MODEL_CMD exited with {r.returncode}: {(r.stderr or r.stdout)[-500:]}'''))
         return r.stdout, round(time.time() - start, 1)
     if L2.exists():
         spec = importlib.util.spec_from_file_location("wife_l2", L2)
@@ -47,4 +49,4 @@ def ask(prompt):
         spec.loader.exec_module(mod)
         text, _, secs = mod.agy(prompt, L2_MODEL, str(Path.home()))
         return text, secs
-    raise ModelUnavailable("沒設 CW_MODEL_CMD，也沒有本機 wife_l2.py：只切段、不附建議")
+    raise ModelUnavailable(t("沒設 CW_MODEL_CMD，也沒有本機 wife_l2.py：只切段、不附建議", 'Neither CW_MODEL_CMD nor local wife_l2.py is available: segments only, no advice'))

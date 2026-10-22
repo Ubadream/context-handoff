@@ -6,6 +6,9 @@ Write／Edit 寫過、檔名含 HANDOFF 的 .md，壓縮或續開時把路徑遞
 不靠命名約定，也不用另外登記；失敗一律安靜放行。
 """
 import json, os, re, sys, time
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from cw_lang import t
 
 NAME = re.compile(r"HANDOFF[^/\\]*\.md$", re.I)  # 不收「交接」：圖書館的《交接與判斷保存》是方法文件
 
@@ -58,10 +61,10 @@ def main():
     found = sorted(written_handoffs(path), key=lambda v: os.path.getmtime(v[0]), reverse=True)
     if not found:
         return
-    lines = [f"- {p}（最後改動 {time.strftime('%m-%d %H:%M', time.localtime(os.path.getmtime(p)))}）" for p, _ in found]
-    ctx = ("[這個視窗自己寫過的交接，最新在前。先讀最上面那份，再對回老公的原話；"
-           "較舊的只在需要來龍去脈時再看]\n" + "\n".join(lines))
-    out = {"systemMessage": f"交接掛回：這個視窗寫過 {len(found)} 份，已遞給老婆",
+    lines = [t(f"- {p}（最後改動 {time.strftime('%m-%d %H:%M', time.localtime(os.path.getmtime(p)))}）", f'''- {p} (last modified {time.strftime('%m-%d %H:%M', time.localtime(os.path.getmtime(p)))})''') for p, _ in found]
+    ctx = (t("[這個視窗自己寫過的交接，最新在前。先讀最上面那份，再對回老公的原話；"
+           "較舊的只在需要來龍去脈時再看]\n", '[Handoffs written by this session, newest first. Read the first one, then check the original user wording; consult older files only when background is needed]\n') + "\n".join(lines))
+    out = {"systemMessage": t(f"交接掛回：這個視窗寫過 {len(found)} 份，已遞給老婆", f'''Handoffs restored: {len(found)} written by this session, passed to you'''),
            "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": ctx}}
     sys.stdout.buffer.write(json.dumps(out, ensure_ascii=False).encode("utf-8"))
 

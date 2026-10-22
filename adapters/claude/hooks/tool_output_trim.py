@@ -31,6 +31,7 @@ READ_THRESHOLD = 20000
 READ_KEEP = 12000
 KEEP_DAYS = 7
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # adapters/claude：共用位置
+from cw_lang import t
 from cw_paths import STATE_ROOT  # noqa: E402
 
 STORE = STATE_ROOT / "claude-tool-output"
@@ -71,8 +72,12 @@ def trim(text, label, source, limits):
     if not path.exists():
         path.write_text(f"# {source}\n{text}", encoding="utf-8")
     lines = text.count("\n") + 1
-    note = (f"\n\n[… 中間略過；完整{label} {len(text):,} 字、{lines:,} 行已存到 {path} "
-            f"（第 1 行是來源）。要看就用 Read（offset/limit）或 grep 這個檔。]\n\n")
+    note = (t(f"\n\n[… 中間略過；完整{label} {len(text):,} 字、{lines:,} 行已存到 {path} "
+            f"（第 1 行是來源）。要看就用 Read（offset/limit）或 grep 這個檔。]\n\n", f'''
+
+[... middle omitted; full {label}: {len(text):,} characters, {lines:,} lines saved to {path} (line 1 identifies the source). Use Read (offset/limit) or grep to inspect.]
+
+'''))
     first, last = text[:head], text[-tail:]
     # 切在換行處，不留半行；整段沒換行就照字數切
     if "\n" in first:
@@ -121,8 +126,8 @@ def trim_read(response, tool_input):
     start = f.get("startLine") or 1
     next_line = start + len(kept)
     total = f.get("totalLines") or (start + len(lines) - 1)
-    kept.append(f"[… 只放前 {len(kept)} 行進上下文（這次讀到 {len(lines):,} 行、{len(content):,} 字，檔案共 {total:,} 行）。"
-                f"要後面就 Read 同一個檔，offset={next_line}，帶 limit；要一次全讀就明寫 offset=1 和 limit。]")
+    kept.append(t(f"[… 只放前 {len(kept)} 行進上下文（這次讀到 {len(lines):,} 行、{len(content):,} 字，檔案共 {total:,} 行）。"
+                f"要後面就 Read 同一個檔，offset={next_line}，帶 limit；要一次全讀就明寫 offset=1 和 limit。]", f'''[... Only the first {len(kept)} lines are included in context (this read: {len(lines):,} lines, {len(content):,} characters; file: {total:,} lines). Read the same file with offset={next_line} and limit for more; explicitly set offset=1 and limit to read all at once.]'''))
     new_f = dict(f, content="\n".join(kept))
     if isinstance(f.get("numLines"), int):
         new_f["numLines"] = len(kept)
@@ -153,7 +158,7 @@ def main():
         else:
             source = f"{tool} {json.dumps(tool_input, ensure_ascii=False)[:300]}"
         STORE.mkdir(parents=True, exist_ok=True)
-        updated, hit = walk(response, "輸出", source, LIMITS.get(tool, OTHER))
+        updated, hit = walk(response, t("輸出", 'output'), source, LIMITS.get(tool, OTHER))
         if not hit:
             return
         try:

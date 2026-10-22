@@ -26,14 +26,17 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from cw_lang import t
+
 HOME = Path(os.environ.get("CLAUDE_HOME", Path.home() / ".claude"))
 SETTINGS = HOME / "settings.json"
+from cw_lang import lang
 from cw_paths import WORKBENCH_STATE  # noqa: E402
 
 THRESHOLDS = Path(os.environ.get("CW_THRESHOLDS", WORKBENCH_STATE / "thresholds.json"))
 WINDOW_ENV = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
 DEFAULTS = {"remind": [250_000, 400_000, 600_000, 800_000, 900_000], "consider": 400_000, "urgent": 800_000,
-            "idle": {"enabled": True, "tokens": 400_000, "minutes": 50}, "handoff_sections": False}
+            "idle": {"enabled": True, "tokens": 400_000, "minutes": 50}, "handoff_sections": False, "language": "zh"}
 LOW, HIGH = 50_000, 1_000_000  # Claude 目前的模型上限 1M
 
 
@@ -45,29 +48,30 @@ def load_json(path, default):
 
 
 def current():
-    t = {**DEFAULTS, **(load_json(THRESHOLDS, {}).get("claude") or {})}
+    values = {**DEFAULTS, **(load_json(THRESHOLDS, {}).get("claude") or {})}
     window = (load_json(SETTINGS, {}).get("env") or {}).get(WINDOW_ENV)
     return {
         "host": "claude",
-        "remind": {"value": t["remind"], "consider": t["consider"], "urgent": t["urgent"],
-                   "stored_in": str(THRESHOLDS), "takes_effect": "下一句老公發話（context_watch.py 每次重讀）"},
-        "idle": {**DEFAULTS["idle"], **(t.get("idle") or {}), "stored_in": str(THRESHOLDS),
-                 "takes_effect": "下一輪結束（wife-compact 每次重讀）", "note": "Claude 提示快取約一小時，minutes 要小於 60 才來得及"},
-        "handoff_sections": {"value": t["handoff_sections"] is True, "stored_in": str(THRESHOLDS),
-                             "takes_effect": "下一次提醒／交接檢查（每次重讀）"},
-        "auto_compact_window": {"value": int(window) if window else None, "default_means": "模型自己的上限",
-                                "stored_in": f"{SETTINGS} env.{WINDOW_ENV}", "takes_effect": "重開 Claude 之後"},
+        "remind": {"value": values["remind"], "consider": values["consider"], "urgent": values["urgent"],
+                   "stored_in": str(THRESHOLDS), "takes_effect": t("下一句老公發話（context_watch.py 每次重讀）", 'Next user prompt (context_watch.py rereads each time)')},
+        "idle": {**DEFAULTS["idle"], **(values.get("idle") or {}), "stored_in": str(THRESHOLDS),
+                 "takes_effect": t("下一輪結束（wife-compact 每次重讀）", 'At the end of the next turn (wife-compact rereads each time)'), "note": t("Claude 提示快取約一小時，minutes 要小於 60 才來得及", 'Claude prompt cache lasts about an hour; minutes must be below 60')},
+        "handoff_sections": {"value": values["handoff_sections"] is True, "stored_in": str(THRESHOLDS),
+                             "takes_effect": t("下一次提醒／交接檢查（每次重讀）", 'Next reminder/handoff check (reread each time)')},
+        "language": {"value": lang(), "stored_in": str(THRESHOLDS)},
+        "auto_compact_window": {"value": int(window) if window else None, "default_means": t("模型自己的上限", 'The model default limit'),
+                                "stored_in": f"{SETTINGS} env.{WINDOW_ENV}", "takes_effect": t("重開 Claude 之後", 'After restarting Claude')},
     }
 
 
 def check(n, what):
     if not LOW <= n <= HIGH:
-        sys.exit(f"{what} 要在 {LOW:,}～{HIGH:,} 之間：{n:,}")
+        sys.exit(t(f"{what} 要在 {LOW:,}～{HIGH:,} 之間：{n:,}", f'''{what} must be between {LOW:,} and {HIGH:,}: {n:,}'''))
     return n
 
 
 def set_values(args):
-    if args.remind or args.consider or args.urgent or args.idle or args.idle_tokens or args.idle_minutes or args.handoff_sections:
+    if args.remind or args.consider or args.urgent or args.idle or args.idle_tokens or args.idle_minutes or args.handoff_sections or args.language:
         data = load_json(THRESHOLDS, {})
         claude = dict(data.get("claude") or {})  # 只寫這次改的欄位；沒存過的沿用預設、不補寫（面板讀回要逐欄對得上）
         if args.remind:
@@ -84,13 +88,15 @@ def set_values(args):
                 idle["tokens"] = check(args.idle_tokens, "idle-tokens")
             if args.idle_minutes:
                 if not 1 <= args.idle_minutes <= 59:
-                    sys.exit("idle-minutes 要在 1～59 之間（快取約一小時）")
+                    sys.exit(t("idle-minutes 要在 1～59 之間（快取約一小時）", 'idle-minutes must be between 1 and 59 (cache lasts about an hour)'))
                 idle["minutes"] = args.idle_minutes
             claude["idle"] = idle
+        if args.language:
+            claude["language"] = args.language
         if args.handoff_sections:
             claude["handoff_sections"] = args.handoff_sections == "on"
         if claude.get("consider", DEFAULTS["consider"]) > claude.get("urgent", DEFAULTS["urgent"]):
-            sys.exit(f"consider（{claude.get('consider', DEFAULTS['consider']):,}）不能大於 urgent（{claude.get('urgent', DEFAULTS['urgent']):,}）")
+            sys.exit(t(f"consider（{claude.get('consider', DEFAULTS['consider']):,}）不能大於 urgent（{claude.get('urgent', DEFAULTS['urgent']):,}）", f'''consider ({claude.get('consider', DEFAULTS['consider']):,}) cannot exceed urgent ({claude.get('urgent', DEFAULTS['urgent']):,})'''))
         data["claude"] = claude
         THRESHOLDS.parent.mkdir(parents=True, exist_ok=True)
         THRESHOLDS.write_text(json.dumps(data, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
@@ -108,18 +114,19 @@ def set_values(args):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Claude 上下文門檻：看與改")
+    ap = argparse.ArgumentParser(description=t("Claude 上下文門檻：看與改", 'View or change Claude context thresholds'))
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("show")
     s = sub.add_parser("set")
-    s.add_argument("--remind", help="逗號分隔的 token 數，例如 250000,400000,600000")
+    s.add_argument("--remind", help=t("逗號分隔的 token 數，例如 250000,400000,600000", 'Comma-separated token counts, e.g. 250000,400000,600000'))
     s.add_argument("--consider", type=int)
     s.add_argument("--urgent", type=int)
-    s.add_argument("--auto-compact-window", help="token 數，或 default")
+    s.add_argument("--auto-compact-window", help=t("token 數，或 default", 'Token count, or default'))
     s.add_argument("--idle", choices=["on", "off"])
     s.add_argument("--idle-tokens", type=int)
     s.add_argument("--idle-minutes", type=int)
-    s.add_argument("--handoff-sections", choices=["on", "off"], help="交接分三塊（決策／情感／工作進度）的提醒與格式軟檢查")
+    s.add_argument("--handoff-sections", choices=["on", "off"], help=t("交接分三塊（決策／情感／工作進度）的提醒與格式軟檢查", 'Reminders and advisory format checks for three handoff sections (Decisions/Feelings/Work progress)'))
+    s.add_argument("--language", choices=["en", "zh"], help=t("訊息語言（預設 zh）", "Message language (default: zh)"))
     args = ap.parse_args()
     if args.cmd == "set":
         set_values(args)
