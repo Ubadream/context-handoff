@@ -4,18 +4,18 @@ Context Handoff keeps a coding agent on the same task across context compaction.
 
 Built for Claude Code (in daily use) and Codex (hooks, plus an optional patched build as a source preview).
 
-Using Codex? The hooks need no build and install in a couple of minutes: [Codex hooks install](#codex-hooks).
+Using Codex? The hooks need no build and install in a couple of minutes: [Codex hooks install](#codex-hooks). On Codex 0.164 or later, one more config flag lets the agent switch to a fresh context window itself and carry on in the same turn, with its handoff handed back.
 
 ## What it fixes
 
 | Problem | What we do | Status |
 |---|---|---|
-| Cut off mid-task; reasons and rejected approaches get lost | The agent compacts at a natural break, after writing a handoff; a snapshot of the handoff is kept | Claude Code: yes. Codex hooks: reminders only; the host decides when to compact |
+| Cut off mid-task; reasons and rejected approaches get lost | The agent compacts at a natural break, after writing a handoff; a snapshot of the handoff is kept | Claude Code: yes. Codex hooks: yes with Codex's native `new_context` (0.164+, a flag Codex marks under development); otherwise reminders only |
 | The summary drops a detail | After compaction, sentences the summary missed are put back automatically, with their time and who said them. Original words and tool results can also be fetched by ID, hash-checked | Claude Code: yes. Codex hooks: fetch by ID |
 | Rules stop being followed, or nobody knows who said them | The source is one lookup away. A per-rule record of who said it, when, and whether it still holds | Lookup: yes. Per-rule record: planned |
 | Finished work gets redone | After compaction the agent is told the last request was already handled; the Codex patches drop it from replay | Reminder: yes. Host-level: Codex patches (preview) |
 | An old handoff overrides a newer message | Freshness check before compaction | Yes. Showing messages sent after the snapshot: planned |
-| The agent stops after compaction | The agent chooses `continue` or `wait` when it schedules compaction; with `continue` the plugin sends one labelled prompt afterwards to resume authorised work | Claude Code: yes. Codex: patches (preview) |
+| The agent stops after compaction | The agent chooses `continue` or `wait` when it schedules compaction; with `continue` the plugin sends one labelled prompt afterwards to resume authorised work | Claude Code: yes. Codex: `new_context` continues in the same turn; patches (preview) |
 | Compaction is slow or gets stuck | Large tool output is kept in files, so there is less to compact | Partial |
 
 What each part has been tested on: [Details](#details) and [the verification record](docs/VERIFICATION.md).
@@ -89,7 +89,7 @@ Requires Claude Code with **function hooks** (an early-access feature) and `node
 
 ### Codex hooks
 
-Requires Codex with hooks; **0.159.2** is the verified version. Start here for an existing Codex installation without a rebuild.
+Requires Codex with hooks; **0.159.2** is the CI-verified version. Letting the agent switch context windows itself needs **0.164 or later** (in daily use on 0.164 / 0.165). Start here for an existing Codex installation without a rebuild.
 
 1. Preview:
 
@@ -107,6 +107,8 @@ Requires Codex with hooks; **0.159.2** is the verified version. Start here for a
 
    Success: prints `wrote:` and a trust/restart instruction. It backs up existing `$CODEX_HOME/config.toml`, adds one marked block and enables `[features] hooks = true`, preserving other hooks. If it fails, inspect the reported config and backup; do not replace the whole config to bypass the error.
 
+   On Codex 0.164+, add `--new-context` to also set `[features] token_budget = true`. That gives the agent Codex's own `new_context` tool: it starts a fresh window **without a summary**, and the same turn carries on. The reminders then tell the agent to save its handoff, read it back and call `new_context` itself, and the hook hands the handoff back in the new window. Codex marks this flag as under development, so it may change; without it everything else works and the agent asks the user to run `/compact`.
+
 3. Review and trust these four commands through Codex, or use the installer:
 
    ```sh
@@ -121,7 +123,7 @@ Requires Codex with hooks; **0.159.2** is the verified version. Start here for a
    python adapters/codex/install_codex_hooks.py doctor
    ```
 
-   Success: `block: present`, `features: hooks = True`, script `ok`, and **four** enabled hooks with `trust=trusted`. If it prints `could not ask Codex`, check the Codex executable using `--codex`; for missing/untrusted rows, return to apply/trust and check again.
+   Success: `block: present`, `features: hooks = True` (and `token_budget = True` if you chose `--new-context`), script `ok`, and **four** enabled hooks with `trust=trusted`. If it prints `could not ask Codex`, check the Codex executable using `--codex`; for missing/untrusted rows, return to apply/trust and check again.
 
 ### Codex patches (source preview)
 
@@ -183,27 +185,31 @@ The two compaction modes: **A** uses the host's built-in summary; **C** is the s
 | Handoff check | Before compacting: is the handoff newer than the last user message and file edit? The optional model lists what the handoff may have missed. | |
 | Thresholds and idle reminder | Reminders at configurable context sizes. If the user goes idle with a large context, one reminder before the prompt cache expires asks the agent to write its handoff and compact, so the user doesn't pay to re-read the whole window. | |
 | Fixed-overhead diet | Rarely used tools are deferred and long skill descriptions shortened (switchable). | |
-| Three-part handoffs (optional, off by default) | `python adapters/claude/cw_thresholds.py set --handoff-sections on`: reminders and the handoff check ask for a handoff in three parts, decisions / feelings / progress, each item with a pointer back to the original words (time and a short quote, or an originals ID), and the check warns, without blocking, when a part or any pointer is missing. | |
+| Three-part handoffs (optional, off by default) | `python adapters/claude/cw_thresholds.py set --handoff-sections on`: reminders and the handoff check ask for a handoff in three parts, decisions / feelings / progress, each item with a pointer back to the original words (time and a short quote, or an originals ID), and the check warns, without blocking, when a part or any pointer is missing. In the latest decisions block, each item without its own source (`〔據 10-25 20:30「short quote」〕` or an originals ID) is counted in the warning; a changed decision can say what it replaces with `〔取代 …〕`. | |
 
 ### Codex hooks (`adapters/codex/hooks/`)
 
-**No rebuild.** Added 2026-10-11. Four standard Codex hooks, one Python script, nothing compiled. It uses standard hook events, so it does not depend on a pinned Codex build. Tested with Codex 0.159.2.
+**No rebuild.** Added 2026-10-11. Four standard Codex hooks, one Python script, nothing compiled. It uses standard hook events, so it does not depend on a pinned Codex build. Tested with Codex 0.159.2 in CI; in daily use on 0.164 / 0.165.
 
 | Hook | What it does |
 |---|---|
-| PostToolUse, UserPromptSubmit | Context-size reminders, once per threshold until the next compaction. Default: at 60% of the model's context window, update the handoff at the next natural break; at 80%, save it now and tell the user it is a good point to run `/compact`. |
-| PreCompact | Records where the transcript ended, which handoff file is newest in the working directory, and when the user last spoke. Keeps a copy of that handoff as it is at this moment (`context-handoff/handoff-snapshots/`, stored once per SHA-256, one index line per compaction), since handoff files are overwritten in place. |
-| SessionStart (compact) | Tells the agent which handoff to read first, and whether it was saved before or after the user's latest message; says the last request in the summary is not a new one; names the saved copy; points to an index of the part that was just compacted. |
+| PostToolUse, UserPromptSubmit | Context-size reminders, once per threshold until the next compaction. Default: at 60% of the model's context window, update the handoff at the next natural break; at 80%, save it now, then either call `new_context` (when `token_budget` is on) or tell the user it is a good point to run `/compact`. |
+| PreCompact | Records where the transcript ended, which handoff applies, and when the user last spoke. The handoff is the `HANDOFF*.md` this thread itself last wrote successfully, read from the thread's own tool calls (a file it only read, or a write that failed, does not count); if it wrote none, the newest one in the working directory. Keeps a copy of that handoff as it is at this moment (`context-handoff/handoff-snapshots/`, stored once per SHA-256, one index line per compaction), since handoff files are overwritten in place. |
+| SessionStart (compact) | Fires after `/compact`, the host's automatic compaction and `new_context` alike. Tells the agent which handoff to read first, and whether it was saved before or after the user's latest message; says the user's last request is not a new one; names the saved copy; points to an index of the part that was just compacted. |
 | (command) | `list <ID>` and `get <ID>§N` read a section of the compacted transcript back, split at each user message, after checking its SHA-256 against the index. |
+
+**Agent-chosen window switches (`new_context`).** Codex 0.164 added a native `new_context` tool behind `[features] token_budget = true` (`apply --new-context` sets it). Unlike `/compact` it writes no summary: the new window starts from the instructions, the hook's note and the handoff, which is why the handoff has to be written and read back first. The turn does not end, so the agent picks up where the handoff says without waiting for the user.
+
+In the maintainer's daily use, 2026-10-25 to 10-28 (Codex desktop, 0.164 / 0.165): **54 `new_context` calls in 18 threads; every one switched windows and carried on in the same turn with no user message.** Of the 53 after the handoff pointer was added, 51 new windows were pointed at the thread's own handoff; in the other 2 the thread had not written a handoff file before switching.
 
 **What hooks cannot do, compared with the patches:**
 
 | | Hooks | Patches |
 |---|---|---|
-| Who starts compaction | The user (`/compact`) or the host's automatic limit; the agent can only ask | The agent, with a `handoff_compact` tool, at a break it picks |
+| Who starts compaction | With `token_budget`: the agent, via `new_context` (no summary). Without it: the user (`/compact`) or the host's automatic limit | The agent, with a `handoff_compact` tool, at a break it picks, mode A or C |
 | Not replaying the last request | An instruction after compaction | The handoff is bound to the request it covers; the host does not replay it |
-| Handoff | Newest `HANDOFF*.md` in the working directory, with a freshness check | A copy stored and bound to the thread at prepare time |
-| Codex upgrades | Uses standard hooks; recheck compatibility | Pinned to 0.159.2 until the patches are rebased |
+| Handoff | The one this thread last wrote (else newest `HANDOFF*.md` in the working directory), with a freshness check | A copy stored and bound to the thread at prepare time |
+| Codex upgrades | Uses standard hooks; recheck compatibility. `token_budget` is marked under development by Codex | Pinned to 0.159.2 until the patches are rebased |
 | Install | Edits one marked block in `config.toml` | Builds Codex from source (tens of GB, a long first build) |
 
 **Install:** see [Codex hooks install](#codex-hooks).
@@ -213,8 +219,12 @@ The two compaction modes: **A** uses the host's built-in summary; **C** is the s
 
 **Verified:** in CI, with Codex 0.159.2 from npm on Linux and Windows: an isolated `CODEX_HOME`, a loopback model server, no account or credentials. The test installs the hooks, trusts them through Codex's own `hooks/list`, and runs one turn: two tool calls, the host's automatic compaction, one more request. It then checks that the reminder reached the model before compaction, that the note after compaction names the handoff and gives an index ID, and that `get` returns the user's original words. Unit tests cover thresholds, stale or missing handoffs, the second compaction indexing only the new part, refusing a transcript whose bytes changed, and installer edits that leave the rest of `config.toml` alone. On a real 1.69 GB Codex transcript, the first index took 11 seconds (hook timeout: 60).
 
+The thread's-own-handoff lookup, the `new_context` reminder and `apply --new-context` have unit tests on synthetic transcripts. CI does not yet exercise a real `new_context` call; the evidence for that is the daily use above.
+
 **Known gaps:**
 
+- `new_context` depends on a Codex flag marked under development; its name or behaviour may change between releases.
+- The handoff lookup recognises writes it can read without running anything: `apply_patch`, shell redirection (`>`, `>>`, with or without a heredoc) and `tee`, PowerShell `Set-Content`/`Add-Content`/`Out-File`/`[IO.File]::Write…`, and Python `Path(...).write_text`. A handoff written another way falls back to the newest one in the working directory.
 - Hook events carry no token counts, and Codex writes them to the transcript asynchronously, so a reminder arrives one tool call after the threshold is crossed. Keep the last threshold well below the host's automatic-compaction limit.
 - With remote compaction, the host's summary is stored encrypted and only the model provider can read it. `get` marks where such a compaction happened and how many messages were carried over, instead of showing an empty summary. Your handoff, its saved copy and the indexed originals are what stays readable.
 

@@ -61,3 +61,13 @@ def test_format_warnings_are_advisory():
     bad = hc.format_warnings("## 決策\n- 做了一些事")
     assert any("情感／工作進度" in w for w in bad) and any("原話定位" in w for w in bad)
     assert hc.format_warnings("決策：ok\n情感：無\n工作進度：見 9bfa4859-40b4-435b-89b5-f0ea6f1baaf5") == []
+
+
+def test_decision_items_without_source_warn():
+    import cw_handoff_check as hc
+    text = ("## 決策\n- 評測停在 1500 萬〔據 10-21 20:00「我估1500」〕\n- max turns 維持 12\n  - 子項不算\n"
+            "- 改回原本的摘要〔取代「壓縮不是主因」〕〔據 9bfa4859§3〕\n## 情感\n無\n## 工作進度\n無\n")
+    warnings = hc.format_warnings(text)
+    assert len(warnings) == 1 and "1/3" in warnings[0]
+    # 交接一段段往下接：只看最後一個決策塊
+    assert hc.format_warnings("## 決策\n- 舊的沒來源\n## 情感\n無\n## 工作進度\n無\n" + text.replace("- max turns 維持 12\n", "")) == []

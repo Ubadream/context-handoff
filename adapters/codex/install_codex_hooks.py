@@ -4,6 +4,7 @@
 
     python adapters/codex/install_codex_hooks.py doctor              # what is registered and trusted
     python adapters/codex/install_codex_hooks.py apply [--dry-run]   # add the hooks to config.toml
+        [--new-context]                                              # also let the agent call new_context
     python adapters/codex/install_codex_hooks.py trust               # trust exactly these hooks
     python adapters/codex/install_codex_hooks.py remove [--dry-run]  # take them out again
 
@@ -48,7 +49,7 @@ def commands() -> tuple[str, str]:
     return shlex.join(args), "& " + " ".join("'" + a.replace("'", "''") + "'" for a in args)
 
 
-def block(text: str) -> str:
+def block(text: str, flags: tuple[str, ...] = ("hooks",)) -> str:
     posix, windows = commands()
     out = [BEGIN]
     for event, matcher, timeout, status in EVENTS:
@@ -60,7 +61,7 @@ def block(text: str) -> str:
         if status:
             out.append(f"statusMessage = {json.dumps(status)}")
     if not re.search(r"(?m)^\[features\]\s*$", text):
-        out += ["[features]", "hooks = true"]
+        out += ["[features]"] + [f"{flag} = true" for flag in flags]
     out.append(END)
     return "\n".join(out) + "\n"
 
@@ -79,18 +80,19 @@ def without_block(text: str) -> str:
     return text if span is None else text[:span[0]] + text[span[1]:]
 
 
-def features_on(text: str) -> str:
-    """Set hooks = true inside an existing [features] table, leaving everything else as it is."""
+def features_on(text: str, flags: tuple[str, ...] = ("hooks",)) -> str:
+    """Set each flag = true inside an existing [features] table, leaving everything else as it is."""
     match = re.search(r"(?m)^\[features\]\s*$", text)
     if not match:
         return text
     body_end = re.search(r"(?m)^\[", text[match.end():])
     body_end = match.end() + body_end.start() if body_end else len(text)
     body = text[match.end():body_end]
-    if re.search(r"(?m)^hooks\s*=", body):
-        body = re.sub(r"(?m)^hooks\s*=.*$", "hooks = true", body)
-    else:
-        body = "\nhooks = true" + body
+    for flag in flags:
+        if re.search(rf"(?m)^{flag}\s*=", body):
+            body = re.sub(rf"(?m)^{flag}\s*=.*$", f"{flag} = true", body)
+        else:
+            body = f"\n{flag} = true" + body
     return text[:match.end()] + body + text[body_end:]
 
 
@@ -108,11 +110,14 @@ def write(path: Path, old: str, new: str, dry: bool) -> None:
     print(f"wrote: {path}")
 
 
-def apply(dry: bool) -> None:
+def apply(dry: bool, new_context: bool = False) -> None:
     path = config_path()
     old = path.read_text(encoding="utf-8") if path.exists() else ""
-    base = features_on(without_block(old))
-    new = base.rstrip("\n") + ("\n\n" if base.strip() else "") + block(base)
+    # A [features] table may live inside our block; rewriting the block must not drop a flag already on.
+    on = tomllib.loads(old).get("features", {}) if old else {}
+    flags = ("hooks", "token_budget") if new_context or on.get("token_budget") is True else ("hooks",)
+    base = features_on(without_block(old), flags)
+    new = base.rstrip("\n") + ("\n\n" if base.strip() else "") + block(base, flags)
     write(path, old, new, dry)
     if not dry:
         print("next: trust the hooks (review them in Codex, or run `trust`), then restart Codex")
@@ -191,7 +196,9 @@ def doctor(codex: str | None) -> None:
     data = tomllib.loads(text) if text else {}
     print(f"config:   {path}")
     print(f"block:    {'present' if bounds(text) else 'absent'}")
-    print(f"features: hooks = {data.get('features', {}).get('hooks')}")
+    features = data.get("features", {})
+    print(f"features: hooks = {features.get('hooks')}, token_budget = {features.get('token_budget')}"
+          " (token_budget gives the agent its own new_context tool, Codex 0.164+)")
     print(f"script:   {HOOK} ({'ok' if HOOK.is_file() else 'MISSING'})")
     print(f"settings: {codex_home() / 'context-handoff' / 'hooks.json'} (optional)")
     if bounds(text):
@@ -206,10 +213,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("command", choices=["doctor", "apply", "trust", "remove"])
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--new-context", action="store_true",
+                        help="apply: also set [features] token_budget = true, so the agent can call new_context itself")
     parser.add_argument("--codex", help="codex executable used for trust/doctor (default: CODEX_CLI_PATH or PATH)")
     args = parser.parse_args()
     if args.command == "apply":
-        apply(args.dry_run)
+        apply(args.dry_run, args.new_context)
     elif args.command == "remove":
         remove(args.dry_run)
     elif args.command == "trust":
