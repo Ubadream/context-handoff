@@ -109,3 +109,11 @@ def test_apply_new_context_sets_token_budget(home, existing):
     assert data["features"]["hooks"] is True and data["features"]["token_budget"] is True
     installer.apply(dry=False)  # a later plain apply leaves the flag alone
     assert tomllib.loads(config.read_text(encoding="utf-8"))["features"]["token_budget"] is True
+
+
+def test_live_rollout_cut_mid_character(tmp_path):
+    target = handoff(tmp_path)
+    path = rollout(tmp_path, call(f"Set-Content '{target}' 'x'"), done())
+    with open(path, "ab") as stream:  # the host is still writing: the last line ends inside a UTF-8 character
+        stream.write(b'{"type":"response_item","payload":{"text":"' + "\u00e9".encode("utf-8")[:-1])
+    assert thread_handoffs.written_handoffs(path, SID) == [str(target)]

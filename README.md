@@ -200,7 +200,7 @@ The two compaction modes: **A** uses the host's built-in summary; **C** is the s
 
 **Agent-chosen window switches (`new_context`).** Codex 0.164 added a native `new_context` tool behind `[features] token_budget = true` (`apply --new-context` sets it). Unlike `/compact` it writes no summary: the new window starts from the instructions, the hook's note and the handoff, which is why the handoff has to be written and read back first. The turn does not end, so the agent picks up where the handoff says without waiting for the user.
 
-In the maintainer's daily use, 2026-10-25 to 10-28 (Codex desktop, 0.164 / 0.165): **54 `new_context` calls in 18 threads; every one switched windows and carried on in the same turn with no user message.** Of the 53 after the handoff pointer was added, 51 new windows were pointed at the thread's own handoff; in the other 2 the thread had not written a handoff file before switching.
+In the maintainer's daily use, 2026-10-25 to 10-28 (Codex desktop, 0.164 / 0.165): **191 `new_context` calls in 30 threads. All 190 that ran switched windows and carried on in the same turn with no user message** (the other one was cancelled before it ran). Of the 189 after the handoff pointer was added, 184 new windows were pointed at the thread's own handoff; in 3 the thread had not written a handoff file yet, and 2 were missed by a bug since fixed (the rollout was still being written and ended mid-character).
 
 **What hooks cannot do, compared with the patches:**
 
