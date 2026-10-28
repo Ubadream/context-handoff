@@ -37,7 +37,9 @@ def written_handoffs(transcript):
                 for p in paths:
                     if NAME.search(p):
                         p = os.path.join(o.get("cwd") or "", p).replace("\\", "/")  # 相對路徑照當時的工作目錄補全，免得同一份算兩次
-                        seen[os.path.normcase(os.path.normpath(p))] = (p, o.get("timestamp", ""))
+                        key, ts = os.path.normcase(os.path.normpath(p)), o.get("timestamp", "")
+                        if ts >= seen.get(key, ("", ""))[1]:  # 1027：壓縮後檔尾會重抄舊訊息（帶舊時間），取最晚的，不取最後讀到的
+                            seen[key] = (p, ts)
     return [v for v in seen.values() if os.path.exists(v[0])]
 
 

@@ -10,9 +10,16 @@ One script, registered for four Codex hook events by install_codex_hooks.py:
     SessionStart (source=compact)   point the agent at its handoff, say the last request is not new,
                                     and index the compacted part of the transcript for later lookup
 
-What hooks cannot do, and the patched build can: let the agent itself start a compaction, and bind
-the handoff to the request it covers so the host structurally never replays that request. Here the
-agent is reminded to save its handoff and ask the user to run /compact, and the post-compaction
+"Its handoff" is the HANDOFF*.md this thread itself last wrote (see thread_handoffs.py); if it wrote
+none, the newest HANDOFF*.md in the working directory.
+
+Letting the agent choose the moment: Codex 0.164 and later have a native `new_context` tool behind
+`[features] token_budget = true` (marked under development by Codex). It starts a fresh context
+window without a summary and the same turn carries on; PreCompact and SessionStart(compact) still
+fire, so the handoff pointer above arrives in the new window. When the flag is on, reminders tell
+the agent to save its handoff and call `new_context` itself; otherwise they tell it to ask the user
+to run /compact. What hooks still cannot do, and the patched build can: bind the handoff to the
+request it covers so the host structurally never replays that request; here the post-compaction
 note is an instruction the model can still ignore.
 
 Reading the compacted originals back:
@@ -34,8 +41,12 @@ import os
 import re
 import sys
 import tempfile
+import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import thread_handoffs  # noqa: E402
 
 DEFAULTS = {"thresholds": [0.6, 0.8], "handoff_globs": ["HANDOFF*.md", "handoff*.md"]}
 TAG = "[context-handoff]"
@@ -166,6 +177,24 @@ def newest_handoff(cwd: str | None, globs: list[str]) -> Path | None:
     return max(found, key=lambda p: p.stat().st_mtime, default=None)
 
 
+def find_handoff(event: dict, path: Path) -> Path | None:
+    """The handoff this thread last wrote; failing that, the newest one in the working directory."""
+    try:
+        written = thread_handoffs.written_handoffs(path, event.get("session_id", ""))
+    except OSError:
+        written = []
+    return Path(written[0]) if written else newest_handoff(event.get("cwd"), settings()["handoff_globs"])
+
+
+def native_new_context() -> bool:
+    """Whether Codex offers the agent its own `new_context` tool ([features] token_budget = true)."""
+    try:
+        with (codex_home() / "config.toml").open("rb") as stream:
+            return tomllib.load(stream).get("features", {}).get("token_budget") is True
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+
+
 def iso(ts: float) -> str:
     return datetime.fromtimestamp(ts, timezone.utc).isoformat(timespec="seconds")
 
@@ -198,10 +227,16 @@ def remind(event: dict) -> dict:
         return {}
     state["fired"] = sorted(fired | set(due))
     write_json(state_path, state)
-    handoff = newest_handoff(event.get("cwd"), settings()["handoff_globs"])
+    handoff = find_handoff(event, path)
     where = f"your handoff file ({handoff})" if handoff else "a handoff file (HANDOFF.md in the working directory)"
     share = f" ({used * 100 // window}% of {window})" if window else ""
-    if max(due) == marks[-1]:
+    if max(due) == marks[-1] and native_new_context():
+        text = (f"{TAG} Context is at {used} tokens{share}. At the next natural break (not in the middle of a "
+                f"tool chain), save {where}: the user's standing requests, what is done, what is unfinished, "
+                "operations in flight, and where to resume. Read it back, then call the `new_context` tool "
+                "yourself. It starts a fresh window without a summary, so anything not in the handoff is left "
+                "behind; you continue in the same turn and are pointed back to the handoff.")
+    elif max(due) == marks[-1]:
         text = (f"{TAG} Context is at {used} tokens{share}. Save {where} now: the user's standing requests, "
                 "what is done, what is unfinished, operations in flight, and where to resume. Then tell the "
                 "user this is a good point to run /compact, before the host compacts on its own in the middle "
@@ -221,7 +256,7 @@ def before_compact(event: dict) -> dict:
     for _, raw, record in records(path, state.get("boundary", 0), end):
         if b'"user"' in raw and user_text(record) is not None:
             last_user = record.get("timestamp")
-    handoff = newest_handoff(event.get("cwd"), settings()["handoff_globs"])
+    handoff = find_handoff(event, path)
     try:
         digest = snapshot_handoff(handoff, event) if handoff else None
     except OSError as exc:  # a failed copy must not lose the compaction bookkeeping below
@@ -287,10 +322,10 @@ def after_compact(event: dict) -> dict:
     state_path, state = session_state(sid)
     pending = state.pop("pending", None)
     state["fired"] = []  # reminders start over in the new context
-    lines = [f"{TAG} The conversation was just compacted."]
+    lines = [f"{TAG} The conversation was just compacted or moved to a new context window."]
     if not pending or pending.get("transcript") != str(path):
         write_json(state_path, state)
-        lines.append("Read your handoff file before continuing. The last request in the summary was already "
+        lines.append("Read your handoff file before continuing. The user's last request was already "
                      "being worked on; it is not a new request. Do not redo finished work.")
         return {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": " ".join(lines)}}
     start, end = state.get("boundary", 0), pending["end"]
@@ -305,8 +340,8 @@ def after_compact(event: dict) -> dict:
 
     handoff, mtime, last_user = pending.get("handoff"), pending.get("handoff_mtime"), parse_ts(pending.get("last_user"))
     if not handoff:
-        lines.append("No handoff file was found in the working directory; rebuild your bearings from the "
-                     "summary and the originals below before acting.")
+        lines.append("No handoff file was found (none written by this thread, none in the working directory); rebuild your bearings from the "
+                     "summary (if any) and the originals below before acting.")
     elif last_user and mtime < last_user:
         lines.append(f"Your handoff is {handoff}, but it was last saved before the user's latest message, so it "
                      "may miss that request. Read it, then check the originals below for what came after.")
@@ -315,7 +350,7 @@ def after_compact(event: dict) -> dict:
     if pending.get("handoff_sha256"):
         copy = state_dir() / "handoff-snapshots" / "blobs" / f"{pending['handoff_sha256']}.md"
         lines.append(f"The handoff as it was at this compaction is kept at {copy}.")
-    lines.append("The last request in the summary was already being worked on; it is not a new request. Continue "
+    lines.append("The user's last request was already being worked on; it is not a new request. Continue "
                  "what the handoff lists as unfinished and do not redo finished work.")
     script = Path(__file__).resolve()
     lines.append(f"The compacted part is indexed as {ident}: {len(sections)} sections, split at each user "

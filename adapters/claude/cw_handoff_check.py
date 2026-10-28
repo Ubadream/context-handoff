@@ -82,14 +82,26 @@ def format_warnings(text):
     if missing:
         warnings.append(t("交接缺少標題：", 'Missing handoff headings: ') + "／".join(missing))
     # UUID、段號／節號、明示原文 ID，或同一行的時間與引句。
-    locator = re.search(
+    locator = re.compile(
         r"\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b"
         r"|\b[0-9a-f]{8}#[0-9a-f]{8}\b|\b[\w@.-]+§\d+"
         r"|(?:原文|original(?:-text)?)\s*ID\s*[:：=]\s*[`\"']?[A-Za-z0-9][\w.-]+"
-        r"|(?:\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?|\d{1,2}:\d{2})[^\n]*[「“\"][^」”\"\n]+[」”\"]",
-        text, re.I)
-    if not locator:
+        r"|(?:\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?|\d{1,2}:\d{2})[^\n]*[「“\"][^」”\"\n]+[」”\"]"
+        r"|〔據|\[source\b|\bwm1:", re.I)
+    if not locator.search(text):
         warnings.append(t("交接沒有原話定位：補時間＋原話短句或原文 ID", 'Handoff has no original-text reference: add a timestamp and short quote or original-text ID'))
+    # 決策塊每條帶〔據 …〕，改票再加〔取代 …〕；交接檔常是一段段往下接，只看最後一個決策塊
+    blocks = list(re.finditer(r"^\s*(?:#{1,6}\s*)?(?:\*\*)?(?:決策|Decisions)(?:\*\*)?[^\n]*\n(.*?)"
+                              r"(?=^\s*(?:#{1,6}\s*)?(?:\*\*)?(?:情感|工作進度|Feelings|Work progress)(?:\*\*)?|\Z)",
+                              text, re.M | re.S))
+    block = blocks[-1] if blocks else None
+    if block:
+        items = [ln for ln in block.group(1).splitlines() if re.match(r"(?:[-*•]|\d+[.)、])\s+\S", ln)]  # 只算頂層條目
+        bare = [ln for ln in items if not locator.search(ln)]
+        if bare:
+            warnings.append(t(f"決策 {len(bare)}/{len(items)} 條沒附〔據 時間「原話短句」〕；改票的再加〔取代 …〕",
+                              f"{len(bare)}/{len(items)} decisions lack a source such as [source 10-25 20:30 \"short quote\"]; "
+                              "when a decision changes, add [replaces ...]"))
     return warnings
 
 

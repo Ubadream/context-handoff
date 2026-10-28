@@ -484,7 +484,7 @@ function errText(err: unknown): string {
 }
 
 // 桌面版看不到 $.ui.log，每一步另外寫進檔案，出事時才查得到停在哪
-const VERSION = '0.3.23';
+const VERSION = '0.3.24';
 let traceChain: Promise<void> = Promise.resolve();
 function trace($: any, msg: string): void {
   const line = `${new Date().toISOString()} v${VERSION} ${msg}\n`;
